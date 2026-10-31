@@ -1,0 +1,24 @@
+{
+  "name": "tenant-leak-check",
+  "version": "0.1.0",
+  "description": "Tests whether one tenant can read or change another tenant's data in a local Supabase project. An isolation test, not a security certification.",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "tenant-leak-check": "src/cli.ts"
+  },
+  "scripts": {
+    "tlc": "node src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/unit/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}

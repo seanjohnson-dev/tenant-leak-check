@@ -59,8 +59,9 @@ Planned source layout (built across sessions 1 to 3):
 | `src/cli.ts` | Entry point, sub-commands, argument parsing, exit codes |
 | `src/core/` | Exit codes, the disclaimer text, error types, shared result types |
 | `src/safety/local-only.ts` | Loopback-only URL guard |
-| `src/commands/` | `doctor`, `run`, `diff` |
-| `src/stack/` | Sandbox creation, generated `config.toml`, Supabase CLI wrapper, reading `status` |
+| `src/commands/` | `doctor`, `run` (CLI summary), `diff` |
+| `src/engine.ts` | One full run: sandbox, stack, discovery, seeding, probes, analysis, in that order; returns the result object every report is rendered from |
+| `src/stack/` | Sandbox creation, generated `config.toml`, Supabase CLI wrapper, reading `status`, the `postgres` connection (`db.ts`) |
 | `src/config/` | Loading and validating the optional `tenant-leak-check.json` |
 | `src/discover/` | Catalog queries (tables, columns, constraints, policies, grants, functions, views, buckets) and the tenancy model |
 | `src/seed/` | Synthetic users, tenants, rows and files; value generation; snapshot and restore |
@@ -138,7 +139,11 @@ The detected model is printed in every report ("How we decided who owns each tab
 - **Inserts run as the tenant**: each insert runs as `postgres`, but inside a transaction that sets `request.jwt.claims` to the tenant user's claims, so defaults such as `owner_id default auth.uid()` and triggers see the right user. If a trigger still blocks the insert, the tool retries once with `session_replication_role = replica` (triggers and foreign-key triggers off) and records this in the evidence ("seeded with triggers switched off").
 - **Values** come from the column type and constraints: unique `tlc` marker strings for text (for example `tlc-B-invoices-1-k3f9q2`), random UUIDs, small positive numbers, today's date and time, `true`, the first enum label, `{}` for JSON and arrays, and foreign keys pointing at the same tenant's parent rows. For check constraints the generator reads simple shapes from the expression (`IN (...)`, `= ANY (ARRAY[...])`, `>`, `>=`, `<`, `<=`, `BETWEEN`, `length(...)`, `char_length(...)`) and picks a value that satisfies them. If an insert still fails, the Postgres error is kept as the reason and every probe on that table becomes `not_tested`: "could not create test data because: <error in plain words>".
 - **Files**: in every bucket the tool uploads, with the service key, one canary file per tenant under the common folder conventions (`<user id>/tlc-canary.txt` and `<tenant id>/tlc-canary.txt`, or the configured path template).
-- **Snapshot**: after seeding, the tool takes a snapshot of every seeded row (by primary key) and every seeded object. The snapshot is used for verification and to restore anything a probe changed.
+- **Rows the app creates itself**: before inserting, the tool looks for rows that already belong to the tenant (for example a `profiles` row made by a sign-up trigger, or a membership made by a trigger on the tenant table) and reuses them. Tables where a second row per tenant cannot exist (the tenant table, the membership table, tables keyed by the user's id) get one row per tenant.
+- **Fallbacks**: each row is tried with every fillable column first, then with only the required columns, each first with triggers on and then off. Values given in `seed.values` in the config always win.
+- **Materialized views** are refreshed after seeding, so they contain the test data (otherwise they would be empty and look safe).
+- **Markers**: a value counts as tenant B's only if it is distinctive (a UUID or a `tlc` marker) and appears in none of tenant A's rows and no shared row, so a shared reference (such as a plan code both tenants use) can never be mistaken for a leak.
+- **Snapshot**: after seeding, the tool takes a snapshot of every row in every probed table (by primary key, or by the whole row without one) and every seeded object. The snapshot is used for verification and to restore anything a probe changed. Restores run with triggers and foreign-key actions off, so rows removed by cascades come back exactly, and the tool checks that the restore matched the snapshot before the next probe.
 
 ### 7.2 Probe matrix for tables and views
 
@@ -162,6 +167,10 @@ Rules that keep results honest:
 - After each write probe, anything that changed is restored from the snapshot, so later probes start from a known state.
 - Views: `select` is probed exactly like a table, using tenant B's markers from the underlying tables. Writes are probed only on views Postgres reports as updatable. Materialized views are probed for `select` only (they cannot have RLS).
 - Requests have a 10-second timeout. `statement_timeout` is set to 5 seconds for `anon` and `authenticated` in the sandbox database.
+- The re-assign probe is run as tenant A only (an anonymous visitor owns no rows). It is not applicable to the tenant table and to shared tables.
+- In insert probes on tenant tables, links to `auth.users` that are not the owner key carry tenant A's own user id (the attacker's best chance: a policy that only checks `user_id = auth.uid()` lets such a row into tenant B's data). On user-owned tables the owner column carries tenant B's user.
+- What Postgres really does decides the result, not what a policy seems to say. Two behaviours matter, and the demo app shows both: `UPDATE` and `DELETE` only reach rows that the caller's `SELECT` policies also show, and PostgREST's `UPDATE` returns the new row, so the new row must pass the `SELECT` policy too. A `WITH CHECK (true)` therefore only leaks where the read policy is also open.
+- Writes through views: a view Postgres can write through (one table, no joins or grouping) is probed on that table's rows, with only the columns the view shows. Views Postgres cannot write through, and materialized views, get `not_tested` (not applicable) for writes.
 
 ### 7.3 Storage probes
 
@@ -175,36 +184,42 @@ For each bucket, as tenant A and as anon:
 | overwrite | `PUT` to tenant B's canary path | The stored object changed (checked with the service key) |
 | delete | `DELETE /storage/v1/object/<bucket>/<B path>` | The object is gone |
 
-A public bucket is reported as a leak for anonymous download, because anyone with the link can fetch every customer's files, unless the config lists the bucket as intentionally public (for example product images). In that case the report shows `pass (allowed public)` and the reason.
+A public bucket is reported as a leak for anonymous download, because anyone with the link can fetch every customer's files, unless the config lists the bucket as intentionally public (for example product images). In that case the report shows `pass (allowed public)` and the reason. Measured on Storage in CLI 2.122: a public bucket also serves every file on the `/object/authenticated/` endpoint without checking policies, so tenant A's download is a leak as well.
+
+The Storage API answers blocked requests with `4xx` codes that look like "not found" or "unauthorized". These are recorded as notes; the verdict comes from `storage.objects` (and, for downloads, from whether the exact canary content came back). Only `5xx` answers and timeouts make a storage check inconclusive.
 
 ### 7.4 RPC probes
 
 For each function `anon` or `authenticated` can execute in an exposed schema:
 
-- **Arguments** are filled by name and type: tenant-like names (`org_id`, `tenant_id` and the other names in section 6) get tenant B's id; user-like names get tenant B's user id; `id` or `<table>_id` get tenant B's row id in the matching table; other UUIDs get tenant B's tenant id; text gets a marker; numbers get 1; booleans get true; JSON gets `{}`. The config can supply exact arguments. A function whose arguments cannot be filled is `not_tested`, with the reason.
+- **Arguments** are filled by name and type, after removing the common prefixes `p_`, `in_`, `arg_`, `v_` and `_`: tenant-like names (`org_id`, `tenant_id` and the other names in section 6) get tenant B's id; user-like names get tenant B's user id; `id` or `<table>_id` get tenant B's row id in the matching table; other UUIDs get tenant B's tenant id; text gets a marker; numbers get 1; booleans get true; JSON gets `{}`. The config can supply exact arguments. A function whose arguments cannot be filled is `not_tested`, with the reason.
 - **Call** `POST /rest/v1/rpc/<fn>` as tenant A and as anon.
 - **Read leak**: the response contains any tenant-B marker.
 - **Write leak**: the snapshot of tenant B's rows differs after the call (changed, deleted, or new rows carrying tenant B's key). The rows are then restored.
-- An error response (for example "not allowed") is a `pass` if tenant B's data is unchanged. An unexpected server error (`5xx`) is `inconclusive`.
+- An error response (for example "not allowed") is a `pass` if tenant B's data is unchanged. An unexpected server error (`5xx`), or a PostgREST error that means the function was never run (`PGRST...` codes), is `inconclusive`.
+- Values the tool itself passed as arguments do not count as read leaks when they come back, so a function that echoes its input is not reported. For the anonymous visitor, both tenants' data counts.
+- A function name shared by several functions (overloads) is `not_tested` unless the config gives its arguments, because the tool cannot tell which one the API would run. A function whose arguments have no names cannot be called through the API at all (unless it takes a single JSON, text or bytea value) and is `not_tested` as not applicable.
 - `SECURITY DEFINER` functions callable by clients are listed in the report with a warning even when no leak was proven, because they run with the owner's rights and skip RLS.
 
 ### 7.5 Static rules (warnings, not leaks)
 
-These come from the catalog and support the probes. They never turn a probe `pass` into a leak:
+These come from the catalog and support the probes. They never turn a probe `pass` into a leak. Each has a stable rule id:
 
-- RLS disabled on an exposed table that clients have grants on.
-- Policies defined but RLS not enabled (the policies have no effect).
-- A policy whose `USING` or `WITH CHECK` is literally `true`.
-- A policy that does not mention `auth.uid()`, `auth.jwt()`, the tenant column or the membership table.
-- An `UPDATE` or `INSERT` policy without a `WITH CHECK` where one is needed.
-- A view without `security_invoker = true` whose owner bypasses RLS.
-- A materialized view readable by `anon` or `authenticated`.
-- A `SECURITY DEFINER` function executable by `anon` or `authenticated`.
-- A public bucket.
+- `rls_disabled`: RLS disabled on an exposed table that clients have grants on.
+- `policies_without_rls`: policies defined but RLS not enabled (the policies have no effect).
+- `policy_always_true`: a client policy whose `USING` or `WITH CHECK` is literally `true` (also on `storage.objects`). Reading a shared table with `USING (true)` is normal and not flagged.
+- `policy_ignores_owner`: a client policy on an owned table that does not look at the owner column (the tenant column or a user column; for child tables, the link to the parent). This catches "any member of any organisation" policies that do check `auth.uid()`.
+- `update_without_with_check`: an `UPDATE` (or `ALL`) policy without an explicit `WITH CHECK`, so Postgres reuses `USING` for the new row.
+- `view_bypasses_rls`: a client-readable view without `security_invoker = true` whose owner bypasses RLS.
+- `materialized_view_exposed`: a materialized view readable by `anon` or `authenticated`.
+- `security_definer_callable`: a `SECURITY DEFINER` function executable by `anon` or `authenticated`.
+- `public_bucket`: a public bucket (with a note when the config marks it as intended).
 
 ## 8. Results, statuses and exit codes
 
-Each check has a stable id such as `table:public.invoices:select:tenant_a`, `storage:documents:download:anon` or `rpc:public.get_invoices:execute:tenant_a`, so runs can be compared.
+Each check has a stable id `kind:object:operation:actor`, such as `table:public.invoices:select:tenant_a`, `view:public.client_directory:select:anon`, `storage:documents:download:anon` or `rpc:public.get_invoices:execute:tenant_a`, so runs can be compared. Kinds: `table`, `view` (views and materialized views), `storage`, `rpc`. Operations: `select`, `insert`, `update`, `update_reassign`, `delete` for tables and views; `list`, `download`, `upload`, `overwrite`, `delete` for storage; `execute` for functions. Actors: `tenant_a`, `anon`.
+
+A `not_tested` check also carries its kind of reason: `not_applicable` (nothing to test by nature, for example reading a shared table), `excluded` (switched off in the config) or `could_not_test` (the tool tried and failed, for example seeding). Only `could_not_test` and `inconclusive` stop a clean result.
 
 | Status | Meaning (as written in the reports) |
 | --- | --- |
@@ -233,7 +248,7 @@ SQL snippets are labelled "starting point: review before applying".
 | --- | --- |
 | 0 | No leaks, and every in-scope check was actually tested. `not_tested` checks that are not applicable by nature (shared-table reads) or excluded in config do not block 0. |
 | 1 | At least one leak (in `diff`: at least one leak in the "after" run). |
-| 2 | No leaks found, but at least one check was `inconclusive` or `not_tested` for a failure reason (seeding failed, setup problem). |
+| 2 | No leaks found, but at least one check was `inconclusive` or `not_tested` for a failure reason (seeding failed, setup problem), or the run itself is unreliable: the test users could not be created or signed in (for example a sign-up trigger in the migrations fails), no table belongs to a tenant or user, or tenant A could not read its own rows anywhere. |
 | 3 | Tool error: bad arguments or config, non-local URL refused, Docker or the Supabase CLI missing, stack failed to start, unexpected crash. |
 | 4 | Migration mode only: no leaks, but the migration needs human review (destructive statements, a policy removed, RLS disabled or no longer forced, or the migration failed to apply on top of seeded data). |
 
@@ -271,6 +286,8 @@ SQL snippets are labelled "starting point: review before applying".
 }
 ```
 
+Placeholders accepted in `rpc.args`, `seed.values` and `membership.values`: `{tenantA.tenant}`, `{tenantB.tenant}` (the tenant's id), `{tenantA.user}`, `{tenantB.user}` (the test user's id) and `{tenantA.row:schema.table}`, `{tenantB.row:schema.table}` (the primary key of that tenant's first test row in the table). `storage.pathTemplates` accepts `{tenant}`, `{user}` and `{file}`.
+
 ## 11. Reports
 
 All three formats come from one in-memory result object.
@@ -285,7 +302,7 @@ All three formats come from one in-memory result object.
 
 - `demo/broken/`: a small multi-tenant "agency" app (organisations, members, projects, tasks, invoices, payments, notes, files) with **planted leaks** covering every category the tool claims to detect: RLS disabled; policies written but RLS never enabled; `USING (true)`; a policy that ignores the tenant (any member of any organisation); insert with another tenant's id (missing `WITH CHECK`); update across tenants; re-assigning a row to another tenant; delete across tenants; anon read; anon write; a public bucket; a storage read policy that ignores the folder; a storage write policy that ignores the folder; a `SECURITY DEFINER` RPC that reads another tenant's data; a `SECURITY DEFINER` RPC that deletes another tenant's data; a view that bypasses RLS; a materialized view exposed to clients; a child table owned only through its parent; and a shared table that clients can write.
 - `demo/fixed/`: the same schema with every leak fixed the recommended way.
-- `demo/leaks.json`: a machine-readable manifest. Each planted leak has an id (`L01`, `L02` and so on), a description, and the check ids that must report `leak`. `demo/LEAKS.md` is the human-readable version.
+- `demo/leaks.json`: a machine-readable manifest. Each planted leak has an id (`L01` to `L19`), a category, a description, the check ids that must report `leak` (48 in all) and the schema warnings it must raise (22 in all). `demo/LEAKS.md` is the human-readable version. The integration tests compare both lists exactly, in both directions: nothing missed on the broken app, nothing extra reported, and on the fixed app every one of the 48 checks ran and passed.
 - `demo/migrations/bad/` and `demo/migrations/good/`: migrations on top of the fixed app. The bad one introduces a leak, disables RLS, drops a policy, drops a column and drops a table. The good one adds a new tenant table with correct RLS and policies.
 - **Integration tests** (`npm run test:integration`, needs Docker): broken app gives exit 1 and every manifest leak is reported; fixed app gives exit 0 with zero leaks and zero failure-type `not_tested` or `inconclusive`; the bad migration gives exit 1 and flags each planted regression; the good migration gives exit 0.
 - **Unit tests** (`npm test`, no Docker): URL guard, exit-code precedence, config validation, tenancy inference on fixture catalogs, value generation for check constraints, the migration SQL scanner, catalog and result diffs, and report rendering (including that the disclaimer is present and secrets are redacted).

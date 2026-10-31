@@ -1,0 +1,206 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
+import { ToolError } from "../../src/core/errors.ts";
+import {
+  EXCLUDED_SERVICES,
+  generateConfigToml,
+  parseTargetSettings,
+  prepareSandbox,
+  SANDBOX_PORTS,
+  sandboxSlug,
+  selectMigrationFiles,
+} from "../../src/stack/sandbox.ts";
+import { type CliResult, parseOwnStackIds, parseStatus, StackManager, summarizeCliFailure } from "../../src/stack/supabase.ts";
+
+const scratch = fileURLToPath(new URL("../../.tlc-work/", import.meta.url));
+
+const ok = (stdout = ""): CliResult => ({ ok: true, missing: false, timedOut: false, stdout, stderr: "" });
+const failed = (stderr: string): CliResult => ({ ok: false, missing: false, timedOut: false, stdout: "", stderr });
+const STATUS = JSON.stringify({
+  API_URL: "http://127.0.0.1:55421",
+  DB_URL: "postgresql://postgres:postgres@127.0.0.1:55422/postgres",
+  ANON_KEY: "anon-key",
+  SERVICE_ROLE_KEY: "service-key",
+});
+
+async function makeProject(files: Record<string, string>): Promise<string> {
+  await mkdir(scratch, { recursive: true });
+  const dir = await mkdtemp(join(scratch, "unit-project-"));
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(dir, path, ".."), { recursive: true });
+    await writeFile(join(dir, path), content);
+  }
+  return dir;
+}
+
+describe("sandbox", () => {
+  it("derives a container-safe slug with a hash of the absolute path", () => {
+    const slug = sandboxSlug("/home/me/My App!");
+    assert.match(slug, /^my-app-[0-9a-f]{6}$/);
+    assert.notEqual(sandboxSlug("/a/app"), sandboxSlug("/b/app"));
+  });
+
+  it("copies only allow-listed settings and ignores env() values", () => {
+    const settings = parseTargetSettings(`
+      project_id = "real-project"
+      [api]
+      schemas = ["public", "api"]
+      max_rows = 500
+      [db]
+      major_version = 15
+      [auth]
+      site_url = "https://example.com"
+      [storage.buckets.avatars]
+      public = true
+      allowed_mime_types = ["image/png"]
+      objects_path = "./avatars"
+      [storage.buckets.secret]
+      file_size_limit = "env(SIZE)"
+      [api.tls]
+      enabled = "env(TLS)"
+    `);
+    assert.deepEqual(settings.schemas, ["public", "api"]);
+    assert.equal(settings.maxRows, 500);
+    assert.equal(settings.majorVersion, 15);
+    assert.deepEqual(settings.buckets, [
+      { name: "avatars", public: true, allowedMimeTypes: ["image/png"] },
+      { name: "secret", public: false },
+    ]);
+  });
+
+  it("uses the Supabase defaults without a config.toml, and notes env() references", () => {
+    const none = parseTargetSettings(undefined);
+    assert.deepEqual(none.schemas, ["public", "graphql_public"]);
+    assert.match(none.notes.join(" "), /no supabase\/config\.toml/);
+    const env = parseTargetSettings('[api]\nschemas = "env(SCHEMAS)"\n');
+    assert.deepEqual(env.schemas, ["public", "graphql_public"]);
+    assert.match(env.notes.join(" "), /environment variable/);
+    assert.throws(() => parseTargetSettings("[api\nbroken"), ToolError);
+  });
+
+  it("generates a config with its own ports, seed off and unneeded services off", () => {
+    const text = generateConfigToml("tlc-demo-abc123", { ...parseTargetSettings(undefined), buckets: [{ name: "docs", public: false }] });
+    const parsed = parseToml(text) as Record<string, Record<string, unknown>>;
+    assert.equal(parsed.project_id as unknown, "tlc-demo-abc123");
+    assert.equal(parsed.api?.port, SANDBOX_PORTS.api);
+    assert.equal(parsed.db?.port, SANDBOX_PORTS.db);
+    assert.equal((parsed.db?.seed as Record<string, unknown>).enabled, false);
+    for (const section of ["realtime", "studio", "local_smtp", "edge_runtime", "analytics"]) {
+      assert.equal(parsed[section]?.enabled, false, section);
+    }
+    assert.equal(((parsed.auth?.email as Record<string, unknown>) ?? {}).enable_confirmations, false);
+    assert.equal(((parsed.storage?.buckets as Record<string, Record<string, unknown>>).docs ?? {}).public, false);
+    assert.ok(EXCLUDED_SERVICES.includes("studio"));
+  });
+
+  it("selects migration files the way the CLI does", () => {
+    assert.deepEqual(selectMigrationFiles(["20240102_b.sql", "seed.sql", "20240101_a.sql", "notes.md", "x_1.sql"]), ["20240101_a.sql", "20240102_b.sql"]);
+  });
+
+  it("copies migrations into the sandbox and never seed files, .env or functions", async () => {
+    const project = await makeProject({
+      "supabase/migrations/20240101000000_init.sql": "create table t (id int);",
+      "supabase/migrations/20240102000000_more.sql": "create table u (id int);",
+      "supabase/seed.sql": "insert into t values (1);",
+      "supabase/.env": "SECRET=1",
+      "supabase/functions/hello/index.ts": "export {}",
+    });
+    const workdir = await mkdtemp(join(scratch, "unit-work-"));
+    const sandbox = await prepareSandbox({ projectDir: project, workdir, excludeMigrations: ["20240102000000_more.sql"] });
+    assert.deepEqual(sandbox.migrations, ["20240101000000_init.sql"]);
+    assert.deepEqual(await readdir(join(sandbox.dir, "supabase")), ["config.toml", "migrations"]);
+    assert.deepEqual(await readdir(join(sandbox.dir, "supabase", "migrations")), ["20240101000000_init.sql"]);
+    assert.match(await readFile(join(sandbox.dir, "supabase", "config.toml"), "utf8"), /project_id = "tlc-/);
+    assert.equal(sandbox.projectId, `tlc-${sandbox.slug}`);
+    const again = await prepareSandbox({ projectDir: project, workdir, excludeMigrations: ["20240102000000_more.sql"] });
+    assert.equal(again.fingerprint, sandbox.fingerprint);
+    const full = await prepareSandbox({ projectDir: project, workdir });
+    assert.notEqual(full.fingerprint, sandbox.fingerprint);
+  });
+
+  it("explains a missing supabase folder or missing migrations", async () => {
+    const empty = await makeProject({ "README.md": "x" });
+    await assert.rejects(prepareSandbox({ projectDir: empty, workdir: scratch }), /No supabase folder/);
+    const noMigrations = await makeProject({ "supabase/config.toml": "" });
+    await assert.rejects(prepareSandbox({ projectDir: noMigrations, workdir: scratch }), /No migration files/);
+  });
+});
+
+describe("supabase CLI wrapper", () => {
+  it("reads local credentials from status and refuses non-local URLs", () => {
+    const creds = parseStatus(STATUS);
+    assert.equal(creds.apiUrl, "http://127.0.0.1:55421");
+    assert.throws(() => parseStatus(JSON.stringify({ ...JSON.parse(STATUS), API_URL: "https://abc.supabase.co" })), /Refusing to connect/);
+    assert.throws(() => parseStatus(JSON.stringify({ API_URL: "http://127.0.0.1:1" })), /did not report its DB_URL/);
+    assert.throws(() => parseStatus("not json"), ToolError);
+  });
+
+  it("finds only tool-owned stacks", () => {
+    assert.deepEqual(parseOwnStackIds("supabase_db_tlc-demo-abc123\nsupabase_db_myapp\nsupabase_db_tlc-x-1\n"), ["tlc-demo-abc123", "tlc-x-1"]);
+  });
+
+  it("removes keys and connection strings from CLI errors", () => {
+    const text = summarizeCliFailure(failed("error: eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.abc sb_secret_123 postgresql://postgres:pw@127.0.0.1:5432/db"));
+    assert.doesNotMatch(text, /eyJ|sb_secret|pw@/);
+  });
+
+  function fakes(running: string[], responses: Record<string, CliResult>) {
+    const calls: string[] = [];
+    const manager = new StackManager({
+      cli: async (args) => {
+        const command = args.join(" ");
+        calls.push(command);
+        const key = Object.keys(responses).find((prefix) => command.startsWith(prefix));
+        return key ? (responses[key] as CliResult) : ok();
+      },
+      docker: async () => ok(running.map((id) => `supabase_db_${id}`).join("\n")),
+    });
+    return { manager, calls };
+  }
+
+  it("stops other tool stacks, starts with the reduced service list and reads status", async () => {
+    const workdir = await mkdtemp(join(scratch, "unit-stack-"));
+    const project = await makeProject({ "supabase/migrations/20240101000000_init.sql": "select 1;" });
+    const sandbox = await prepareSandbox({ projectDir: project, workdir });
+    const { manager, calls } = fakes(["tlc-other-111111"], { status: ok(STATUS) });
+    const creds = await manager.ensureFresh(sandbox);
+    assert.equal(creds.dbUrl, "postgresql://postgres:postgres@127.0.0.1:55422/postgres");
+    assert.equal(calls[0], "stop --project-id tlc-other-111111 --no-backup");
+    assert.match(calls[1] ?? "", new RegExp(`^start -x ${EXCLUDED_SERVICES.join(",")} --workdir `));
+    assert.ok(calls.every((call) => !/link|push|login|--linked/.test(call)), "never runs remote commands");
+  });
+
+  it("resets a running stack for the same sandbox instead of restarting it", async () => {
+    const workdir = await mkdtemp(join(scratch, "unit-stack-"));
+    const project = await makeProject({ "supabase/migrations/20240101000000_init.sql": "select 1;" });
+    const sandbox = await prepareSandbox({ projectDir: project, workdir });
+    const { manager, calls } = fakes([sandbox.projectId], { status: ok(STATUS) });
+    await manager.ensureFresh(sandbox);
+    assert.match(calls[0] ?? "", /^db reset --local --no-seed --workdir /);
+    assert.ok(!calls.some((call) => call.startsWith("start")));
+  });
+
+  it("reports a failed start in plain words and cleans up", async () => {
+    const workdir = await mkdtemp(join(scratch, "unit-stack-"));
+    const project = await makeProject({ "supabase/migrations/20240101000000_init.sql": "select 1;" });
+    const sandbox = await prepareSandbox({ projectDir: project, workdir });
+    const { manager, calls } = fakes([], { start: failed('ERROR: relation "missing" does not exist (SQLSTATE 42P01)') });
+    await assert.rejects(manager.ensureFresh(sandbox), (error: unknown) => error instanceof ToolError && /migrations could not be applied/.test(error.message));
+    assert.ok(calls.some((call) => call.startsWith(`stop --project-id ${sandbox.projectId}`)));
+  });
+
+  it("says so when the CLI is missing", async () => {
+    const workdir = await mkdtemp(join(scratch, "unit-stack-"));
+    const project = await makeProject({ "supabase/migrations/20240101000000_init.sql": "select 1;" });
+    const sandbox = await prepareSandbox({ projectDir: project, workdir });
+    const manager = new StackManager({
+      cli: async () => ({ ok: false, missing: true, timedOut: false, stdout: "", stderr: "" }),
+      docker: async () => ok(""),
+    });
+    await assert.rejects(manager.ensureFresh(sandbox), /supabase command is not installed/);
+  });
+});

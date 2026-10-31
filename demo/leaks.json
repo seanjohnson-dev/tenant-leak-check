@@ -1,0 +1,211 @@
+{
+  "description": "Planted leaks in demo/broken. Each leak lists the check ids that must report \"leak\" on demo/broken and \"pass\" on demo/fixed, and the schema warnings it must raise on demo/broken. The integration tests compare these lists exactly: no leak may be missed and no extra leak may appear. All data in the demo is synthetic.",
+  "broken": "demo/broken",
+  "fixed": "demo/fixed",
+  "leaks": [
+    {
+      "id": "L01",
+      "category": "Row level security disabled",
+      "object": "public.contacts",
+      "description": "Row level security was never switched on, so every client, signed in or not, can read and change every organisation's contacts.",
+      "fix": "Enable row level security and add a membership policy.",
+      "checks": [
+        "table:public.contacts:select:tenant_a",
+        "table:public.contacts:insert:tenant_a",
+        "table:public.contacts:update:tenant_a",
+        "table:public.contacts:update_reassign:tenant_a",
+        "table:public.contacts:delete:tenant_a",
+        "table:public.contacts:select:anon",
+        "table:public.contacts:insert:anon",
+        "table:public.contacts:update:anon",
+        "table:public.contacts:delete:anon"
+      ],
+      "warnings": [{ "rule": "rls_disabled", "object": "public.contacts" }]
+    },
+    {
+      "id": "L02",
+      "category": "Policies written but row level security not enabled (missing protection)",
+      "object": "public.expenses",
+      "description": "The expense policy is correct, but row level security is not enabled on the table, so Postgres ignores the policy.",
+      "fix": "Enable row level security on the table.",
+      "checks": [
+        "table:public.expenses:select:tenant_a",
+        "table:public.expenses:insert:tenant_a",
+        "table:public.expenses:update:tenant_a",
+        "table:public.expenses:update_reassign:tenant_a",
+        "table:public.expenses:delete:tenant_a",
+        "table:public.expenses:select:anon",
+        "table:public.expenses:insert:anon",
+        "table:public.expenses:update:anon",
+        "table:public.expenses:delete:anon"
+      ],
+      "warnings": [
+        { "rule": "rls_disabled", "object": "public.expenses" },
+        { "rule": "policies_without_rls", "object": "public.expenses" }
+      ]
+    },
+    {
+      "id": "L03",
+      "category": "Over-broad policy: USING (true)",
+      "object": "public.projects",
+      "description": "The read policy is USING (true), so any signed-in user reads every organisation's projects.",
+      "fix": "Limit the read policy to the user's own organisations.",
+      "checks": ["table:public.projects:select:tenant_a"],
+      "warnings": [{ "rule": "policy_always_true", "object": "policy \"Signed-in users read projects\" on public.projects" }]
+    },
+    {
+      "id": "L04",
+      "category": "Policy ignores the tenant",
+      "object": "public.invoices",
+      "description": "The read policy checks that the user belongs to some organisation, not to the invoice's organisation.",
+      "fix": "Compare the invoice's org_id with the user's memberships.",
+      "checks": ["table:public.invoices:select:tenant_a"],
+      "warnings": [{ "rule": "policy_ignores_owner", "object": "policy \"Members read invoices\" on public.invoices" }]
+    },
+    {
+      "id": "L05",
+      "category": "Insert with another tenant's id",
+      "object": "public.projects",
+      "description": "The insert policy only checks that the user is signed in, so a user can create projects inside another organisation.",
+      "fix": "Give the insert policy a WITH CHECK on the user's own organisations.",
+      "checks": ["table:public.projects:insert:tenant_a"],
+      "warnings": [{ "rule": "policy_ignores_owner", "object": "policy \"Signed-in users create projects\" on public.projects" }]
+    },
+    {
+      "id": "L06",
+      "category": "Update across tenants",
+      "object": "public.invoices",
+      "description": "The update policy only checks that the user is signed in. With no WITH CHECK, Postgres reuses that rule for the new row, so a user can also move their own invoice into another organisation.",
+      "fix": "Limit USING and WITH CHECK to the user's own organisations.",
+      "checks": ["table:public.invoices:update:tenant_a", "table:public.invoices:update_reassign:tenant_a"],
+      "warnings": [
+        { "rule": "policy_ignores_owner", "object": "policy \"Signed-in users update invoices\" on public.invoices" },
+        { "rule": "update_without_with_check", "object": "policy \"Signed-in users update invoices\" on public.invoices" }
+      ]
+    },
+    {
+      "id": "L07",
+      "category": "Re-assigning a row to another tenant (WITH CHECK (true))",
+      "object": "public.projects",
+      "description": "The update policy checks the project before the change, but WITH CHECK (true) accepts any new org_id, so a member can hand a project to another organisation.",
+      "fix": "Use the same membership rule in WITH CHECK as in USING.",
+      "checks": ["table:public.projects:update_reassign:tenant_a"],
+      "warnings": [{ "rule": "policy_always_true", "object": "policy \"Members update their projects\" on public.projects" }]
+    },
+    {
+      "id": "L08",
+      "category": "Delete across tenants",
+      "object": "public.tasks",
+      "description": "The read and delete policies on tasks are USING (true). Postgres only deletes rows the user can also see, so both are open and any signed-in user can see and delete every organisation's tasks.",
+      "fix": "Reach tasks through their project, whose own policy checks membership.",
+      "checks": ["table:public.tasks:select:tenant_a", "table:public.tasks:delete:tenant_a"],
+      "warnings": [
+        { "rule": "policy_always_true", "object": "policy \"Signed-in users read tasks\" on public.tasks" },
+        { "rule": "policy_always_true", "object": "policy \"Signed-in users delete tasks\" on public.tasks" }
+      ]
+    },
+    {
+      "id": "L09",
+      "category": "Anonymous read",
+      "object": "public.profiles",
+      "description": "Profiles, including phone numbers, are readable by anyone, even visitors who are not signed in.",
+      "fix": "Limit profiles to their own user, for signed-in users only.",
+      "checks": ["table:public.profiles:select:tenant_a", "table:public.profiles:select:anon"],
+      "warnings": [{ "rule": "policy_always_true", "object": "policy \"Profiles are public\" on public.profiles" }]
+    },
+    {
+      "id": "L10",
+      "category": "Anonymous write",
+      "object": "public.quote_requests",
+      "description": "Visitors who are not signed in can file quote requests into any organisation.",
+      "fix": "Accept quote requests only from members (or from a server route using the service role).",
+      "checks": ["table:public.quote_requests:insert:anon"],
+      "warnings": [{ "rule": "policy_always_true", "object": "policy \"Visitors submit quote requests\" on public.quote_requests" }]
+    },
+    {
+      "id": "L11",
+      "category": "Public storage bucket",
+      "object": "storage bucket receipts",
+      "description": "The receipts bucket is public, so anyone with a link can download every user's receipts.",
+      "fix": "Make the bucket private and serve files through signed URLs.",
+      "checks": ["storage:receipts:download:tenant_a", "storage:receipts:download:anon"],
+      "warnings": [{ "rule": "public_bucket", "object": "receipts" }]
+    },
+    {
+      "id": "L12",
+      "category": "Storage read policy ignores the folder",
+      "object": "storage bucket documents",
+      "description": "The documents read policy only checks the bucket, so any signed-in user can list and download every organisation's documents.",
+      "fix": "Check that the first folder of the path is one of the user's organisations.",
+      "checks": ["storage:documents:list:tenant_a", "storage:documents:download:tenant_a"],
+      "warnings": []
+    },
+    {
+      "id": "L13",
+      "category": "Storage write policies ignore the folder",
+      "object": "storage bucket documents",
+      "description": "The documents upload, replace and delete policies only check the bucket, so any signed-in user can add, replace and delete files in other organisations' folders.",
+      "fix": "Check the organisation folder in every write policy.",
+      "checks": ["storage:documents:upload:tenant_a", "storage:documents:overwrite:tenant_a", "storage:documents:delete:tenant_a"],
+      "warnings": []
+    },
+    {
+      "id": "L14",
+      "category": "SECURITY DEFINER function reads another tenant's data",
+      "object": "public.get_org_invoices",
+      "description": "The function runs as its owner, which skips row level security, and never checks membership, so anyone can read any organisation's invoices by passing its id.",
+      "fix": "Make the function SECURITY INVOKER (and stop anonymous visitors from calling it).",
+      "checks": ["rpc:public.get_org_invoices:execute:tenant_a", "rpc:public.get_org_invoices:execute:anon"],
+      "warnings": [{ "rule": "security_definer_callable", "object": "public.get_org_invoices(p_org_id uuid)" }]
+    },
+    {
+      "id": "L15",
+      "category": "SECURITY DEFINER function deletes another tenant's data",
+      "object": "public.delete_project",
+      "description": "The same mistake in a function that deletes: anyone can delete any organisation's project (and its tasks).",
+      "fix": "Make the function SECURITY INVOKER so the projects delete policy applies.",
+      "checks": ["rpc:public.delete_project:execute:tenant_a", "rpc:public.delete_project:execute:anon"],
+      "warnings": [{ "rule": "security_definer_callable", "object": "public.delete_project(p_project_id uuid)" }]
+    },
+    {
+      "id": "L16",
+      "category": "View that bypasses row level security",
+      "object": "public.client_directory",
+      "description": "The view has no security_invoker, so it runs with its owner's rights and shows every organisation's clients to every caller.",
+      "fix": "Create the view WITH (security_invoker = true) and revoke anonymous access.",
+      "checks": ["view:public.client_directory:select:tenant_a", "view:public.client_directory:select:anon"],
+      "warnings": [{ "rule": "view_bypasses_rls", "object": "public.client_directory" }]
+    },
+    {
+      "id": "L17",
+      "category": "Materialized view exposed to clients",
+      "object": "public.org_revenue",
+      "description": "Materialized views cannot have row level security, and this one is readable by every client, so every organisation's revenue is visible.",
+      "fix": "Revoke client access to the materialized view.",
+      "checks": ["view:public.org_revenue:select:tenant_a", "view:public.org_revenue:select:anon"],
+      "warnings": [{ "rule": "materialized_view_exposed", "object": "public.org_revenue" }]
+    },
+    {
+      "id": "L18",
+      "category": "Child table owned only through its parent",
+      "object": "public.payments",
+      "description": "Payments have no organisation column; they belong to an organisation through their invoice. The read policy ignores that and is USING (true).",
+      "fix": "Reach payments through their invoice, whose own policy checks membership.",
+      "checks": ["table:public.payments:select:tenant_a"],
+      "warnings": [{ "rule": "policy_always_true", "object": "policy \"Signed-in users read payments\" on public.payments" }]
+    },
+    {
+      "id": "L19",
+      "category": "Shared table that clients can write",
+      "object": "public.plans",
+      "description": "Plans are reference data every organisation relies on, but any signed-in user can add, change or delete them.",
+      "fix": "Keep only the public read policy; changes go through the service role.",
+      "checks": ["table:public.plans:insert:tenant_a", "table:public.plans:update:tenant_a", "table:public.plans:delete:tenant_a"],
+      "warnings": [
+        { "rule": "policy_always_true", "object": "policy \"Signed-in users add plans\" on public.plans" },
+        { "rule": "policy_always_true", "object": "policy \"Signed-in users change plans\" on public.plans" },
+        { "rule": "policy_always_true", "object": "policy \"Signed-in users delete plans\" on public.plans" }
+      ]
+    }
+  ]
+}

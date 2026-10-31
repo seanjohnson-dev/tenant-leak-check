@@ -15,10 +15,16 @@
     "tlc": "node src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/unit/**/*.test.ts\"",
+    "test:integration": "node --test --test-concurrency=1 \"test/integration/**/*.test.ts\"",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "pg": "^8.23.1",
+    "smol-toml": "^1.9.1"
   }
 }

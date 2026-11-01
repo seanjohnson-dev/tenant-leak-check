@@ -167,6 +167,27 @@ describe("writing reports", () => {
     assert.equal(redactReport('"postgres://user:pa/ss@localhost/db"'), '"postgres://[redacted]@localhost/db"');
   });
 
+  it("redacts database passwords whatever characters they hold, in every rendered format", async () => {
+    const passwords = ["it's", 'pa"ss', "a<b>c", "two words", "p@ss/w:rd", "back\\slash", "amp&semi;"];
+    for (const password of passwords) {
+      const url = `postgresql://postgres:${password}@127.0.0.1:55422/postgres`;
+      assert.doesNotMatch(redactReport(`error: ${url} failed`), new RegExp(password.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), password);
+      assert.match(redactReport(url), /^postgresql:\/\/\[redacted\]@127\.0\.0\.1:55422\/postgres$/, password);
+    }
+    await mkdir(scratch, { recursive: true });
+    const dir = await mkdtemp(join(scratch, "unit-report-"));
+    created.push(dir);
+    const result = sampleRun();
+    const request = result.checks[0]?.evidence?.requests[0];
+    assert.ok(request);
+    request.response = passwords.map((password) => `postgres://u:${password}@localhost/db`).join(" ");
+    const paths = await writeReports(result, join(dir, "out"));
+    for (const path of [paths.json, paths.markdown, paths.html]) {
+      const text = await readFile(path, "utf8");
+      for (const word of ["it's", "it&#39;s", 'pa\\"ss', "pa&quot;ss", "two words", "p@ss", "slash", "amp&semi"]) assert.ok(!text.includes(word), `${path} still contains ${word}`);
+    }
+  });
+
   it("explains a folder it cannot write to", async () => {
     await mkdir(scratch, { recursive: true });
     const dir = await mkdtemp(join(scratch, "unit-report-"));

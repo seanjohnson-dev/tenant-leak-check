@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ToolError } from "../core/errors.ts";
 import { redact } from "../probe/http.ts";
+import { redactDatabaseUrls } from "../safety/redact.ts";
 import { renderHtml } from "./html.ts";
 import { renderJson } from "./json.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -22,8 +23,7 @@ export interface ReportPaths {
  * rendered file once more after it (DESIGN.md section 11).
  */
 export function redactReport(text: string): string {
-  // Greedy up to the last "@" of the URL, so a password that itself holds "@" or "/" is covered too.
-  return redact(text).replace(/(postgres(?:ql)?:\/\/)[^\s"'<>]+@/g, "$1[redacted]@");
+  return redactDatabaseUrls(redact(text));
 }
 
 /** Redacts every string inside a value, so each renderer starts from clean data whatever its escaping. */

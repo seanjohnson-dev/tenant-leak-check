@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MigrationsFailed, ToolError } from "../core/errors.ts";
 import { assertLocalUrl } from "../safety/local-only.ts";
+import { redactDatabaseUrls } from "../safety/redact.ts";
 import { EXCLUDED_SERVICES, PROJECT_ID_PREFIX, type Sandbox } from "./sandbox.ts";
 
 export const START_TIMEOUT_MS = 15 * 60_000;
@@ -51,10 +52,9 @@ const ALLOWED_SUBCOMMANDS = new Set(["start", "status", "db reset", "migration u
 
 /** Keeps the last lines of CLI output that explain a failure, with anything that looks like a key removed. */
 export function summarizeCliFailure(result: CliResult): string {
-  const text = `${result.stderr}\n${result.stdout}`
+  const text = redactDatabaseUrls(`${result.stderr}\n${result.stdout}`)
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, "[redacted]")
-    .replace(/sb_(secret|publishable)_[A-Za-z0-9_-]+/g, "[redacted]")
-    .replace(/postgres(ql)?:\/\/[^\s"']+/g, "postgresql://[redacted]");
+    .replace(/sb_(secret|publishable)_[A-Za-z0-9_-]+/g, "[redacted]");
   const lines = text
     .split("\n")
     .map((line) => line.trim())

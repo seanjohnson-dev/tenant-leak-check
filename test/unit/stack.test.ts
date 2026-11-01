@@ -157,6 +157,9 @@ describe("supabase CLI wrapper", () => {
   it("removes keys and connection strings from CLI errors", () => {
     const text = summarizeCliFailure(failed("error: eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.abc sb_secret_123 postgresql://postgres:pw@127.0.0.1:5432/db"));
     assert.doesNotMatch(text, /eyJ|sb_secret|pw@/);
+    const quoted = summarizeCliFailure(failed("failed to connect to postgres://postgres:it's\"a secret@127.0.0.1:55422/postgres"));
+    assert.doesNotMatch(quoted, /it's|a secret/);
+    assert.match(quoted, /postgres:\/\/\[redacted\]@127\.0\.0\.1:55422\/postgres/);
   });
 
   function fakes(running: string[], responses: Record<string, CliResult>) {

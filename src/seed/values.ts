@@ -103,6 +103,9 @@ export function parseCheckHints(column: string, definitions: readonly string[]):
       const strings = [...list[1].matchAll(/'((?:[^']|'')*)'/g)].map((m) => (m[1] ?? "").replaceAll("''", "'"));
       const values: (string | number)[] = strings.length > 0 ? strings : [...list[1].matchAll(/-?\d+(?:\.\d+)?/g)].map((m) => Number(m[0]));
       if (values.length > 0) hints.allowed = values;
+    } else {
+      const equal = new RegExp(`(?<!NOT\\s*\\(?\\s*)${col}\\s*=\\s*'((?:[^']|'')*)'`, "i").exec(text);
+      if (equal?.[1] !== undefined) hints.allowed = [equal[1].replaceAll("''", "'")];
     }
     const lengthFn = `(?:char_length|character_length|length)\\(\\s*${col}\\s*\\)`;
     for (const m of text.matchAll(new RegExp(`${lengthFn}\\s*(>=|<=|>|<|=)\\s*${NUMBER}`, "gi"))) {

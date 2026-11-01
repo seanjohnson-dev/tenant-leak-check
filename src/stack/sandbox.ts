@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import type { BuildFile } from "../config/config.ts";
 import { ToolError } from "../core/errors.ts";
 
 /**
@@ -275,6 +276,67 @@ export interface SandboxOptions {
   excludeMigrations?: readonly string[];
   /** Extra migration files (absolute paths) appended after the project's own, used by migration mode. */
   extraMigrations?: readonly string[];
+  /** SQL files from the config's `build.files`, slotted into the migration order by their version. */
+  buildFiles?: readonly BuildFile[];
+}
+
+/** The sandbox file name for a `build.files` entry: its version, then its own name without any leading timestamp. */
+export function buildFileName(file: BuildFile): string {
+  const name = basename(file.path).replace(/^\d+_/, "");
+  return `${file.version}_${name}`;
+}
+
+async function copyBuildFiles(
+  files: readonly BuildFile[],
+  migrationsDir: string,
+  sandboxMigrations: string,
+  migrations: string[],
+  notes: string[],
+): Promise<void> {
+  for (const file of files) {
+    if (!existsSync(file.path) || !(await stat(file.path)).isFile()) {
+      throw new ToolError(
+        `The build file ${file.path} (from build.files in the config) does not exist.`,
+        "Paths in build.files are relative to the config file's folder. Fix the path and run the check again.",
+      );
+    }
+    const name = buildFileName(file);
+    // A project migration listed here is moved to its new version instead of running twice.
+    const own = resolve(dirname(file.path)) === migrationsDir ? migrations.indexOf(basename(file.path)) : -1;
+    if (own >= 0) migrations.splice(own, 1);
+    if (migrations.includes(name)) {
+      throw new ToolError(`The build file ${name} clashes with a migration of the same name.`, "Give it a different version in build.files.");
+    }
+    if (own >= 0) await rm(join(sandboxMigrations, basename(file.path)));
+    await copyFile(file.path, join(sandboxMigrations, name));
+    migrations.push(name);
+    notes.push(
+      own >= 0
+        ? `Applied the migration ${basename(file.path)} as ${name} instead (build.files in the config).`
+        : `Added ${file.path} to the build as ${name} (build.files in the config).`,
+    );
+  }
+}
+
+/** The version part of a migration file name (`20240101000000_name.sql` → `20240101000000`). */
+function migrationVersion(name: string): string {
+  return name.split("_", 1)[0] ?? name;
+}
+
+/** The Supabase CLI records each version once, so two migrations with one version stop the build. */
+function assertUniqueVersions(migrations: readonly string[]): void {
+  const seen = new Map<string, string>();
+  for (const name of migrations) {
+    const version = migrationVersion(name);
+    const earlier = seen.get(version);
+    if (earlier) {
+      throw new ToolError(
+        `Two migrations share the version ${version}: ${earlier} and ${name}. The Supabase CLI cannot apply both to a fresh database.`,
+        `Rename one of them in the project, or give one of them an unused version for this check with build.files in the config: { "path": "supabase/migrations/${name}", "version": "<unused version>" }.`,
+      );
+    }
+    seen.set(version, name);
+  }
 }
 
 /**
@@ -295,7 +357,8 @@ export async function prepareSandbox(options: SandboxOptions): Promise<Sandbox> 
   const excluded = new Set(options.excludeMigrations ?? []);
   const own = available.filter((name) => !excluded.has(name));
   const extras = (options.extraMigrations ?? []).map((path) => resolve(path));
-  if (own.length === 0 && extras.length === 0) {
+  const buildFiles = options.buildFiles ?? [];
+  if (own.length === 0 && extras.length === 0 && buildFiles.length === 0) {
     throw new ToolError(
       `No migration files were found in ${migrationsDir}.`,
       "The check builds the database from the project's migrations (files named like 20240101000000_name.sql).",
@@ -317,6 +380,7 @@ export async function prepareSandbox(options: SandboxOptions): Promise<Sandbox> 
     await copyFile(join(migrationsDir, name), join(sandboxMigrations, name));
     migrations.push(name);
   }
+  await copyBuildFiles(buildFiles, migrationsDir, sandboxMigrations, migrations, settings.notes);
   for (const path of extras) {
     const name = basename(path);
     if (!/^\d+_.*\.sql$/.test(name)) {
@@ -332,6 +396,7 @@ export async function prepareSandbox(options: SandboxOptions): Promise<Sandbox> 
     migrations.push(name);
   }
   migrations.sort();
+  assertUniqueVersions(migrations);
   for (const name of migrations) {
     hash.update(name).update(await readFile(join(sandboxMigrations, name)));
   }

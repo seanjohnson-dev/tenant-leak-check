@@ -23,6 +23,13 @@ describe("check constraint reading", () => {
     assert.deepEqual(parseCheckHints("kind", ["CHECK (kind IN ('a', 'it''s'))"]).allowed, ["a", "it's"]);
   });
 
+  it("reads a single allowed text value from col = 'literal', but not from NOT (col = 'literal')", () => {
+    assert.deepEqual(parseCheckHints("action", ["CHECK ((action = 'sign'::text))"]).allowed, ["sign"]);
+    assert.deepEqual(parseCheckHints("note", ["CHECK ((note = 'it''s'::text))"]).allowed, ["it's"]);
+    assert.equal(parseCheckHints("action", ["CHECK ((NOT (action = 'void'::text)))"]).allowed, undefined);
+    assert.equal(parseCheckHints("action", ["CHECK ((other_action = 'sign'::text))"]).allowed, undefined);
+  });
+
   it("reads numeric bounds in either direction", () => {
     assert.deepEqual(parseCheckHints("amount", ["CHECK ((amount > (0)::numeric))"]), { min: 0, minInclusive: false });
     assert.deepEqual(parseCheckHints("score", ["CHECK (((score >= 1) AND (score <= 5)))"]), { min: 1, minInclusive: true, max: 5, maxInclusive: true });

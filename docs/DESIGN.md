@@ -145,6 +145,8 @@ The detected model is printed in every report ("How we decided who owns each tab
 - **Markers**: a value counts as tenant B's only if it is distinctive (a UUID or a `tlc` marker) and appears in none of tenant A's rows and no shared row, so a shared reference (such as a plan code both tenants use) can never be mistaken for a leak.
 - **Snapshot**: after seeding, the tool takes a snapshot of every row in every probed table (by primary key, or by the whole row without one) and every seeded object. The snapshot is used for verification and to restore anything a probe changed. Restores run with triggers and foreign-key actions off, so rows removed by cascades come back exactly, and the tool checks that the restore matched the snapshot before the next probe.
 
+CHECK constraints the value generator reads: `col IN (...)`, `col = ANY (ARRAY[...])`, `col = 'literal'` (not under `NOT`), numeric bounds, and text-length bounds. Constraints that tie several columns together (for example `after = before + amount`) need `seed.values` in the config.
+
 ### 7.2 Probe matrix for tables and views
 
 Actors: **tenant A** (signed-in member of tenant A) and **anon** (only the anon key, no session). For anon, both tenants' rows count as "someone else's data".
@@ -196,7 +198,7 @@ For each function `anon` or `authenticated` can execute in an exposed schema:
 - **Call** `POST /rest/v1/rpc/<fn>` as tenant A and as anon.
 - **Read leak**: the response contains any tenant-B marker.
 - **Write leak**: the snapshot of tenant B's rows differs after the call (changed, deleted, or new rows carrying tenant B's key). The rows are then restored.
-- An error response (for example "not allowed") is a `pass` if tenant B's data is unchanged. An unexpected server error (`5xx`), or a PostgREST error that means the function was never run (`PGRST...` codes), is `inconclusive`.
+- An error response (for example "not allowed") is a `pass` if tenant B's data is unchanged. An unexpected server error (`5xx`), or a PostgREST error that means the function was never run (`PGRST...` codes), is `inconclusive`. An error the function raised itself (SQLSTATE class `P0`, for example `P0002` "not found on this account") is the function refusing and counts as a `pass` with the same proviso, even though PostgREST answers some of these with HTTP 500.
 - Values the tool itself passed as arguments do not count as read leaks when they come back, so a function that echoes its input is not reported. For the anonymous visitor, both tenants' data counts.
 - A function name shared by several functions (overloads) is `not_tested` unless the config gives its arguments, because the tool cannot tell which one the API would run. A function whose arguments have no names cannot be called through the API at all (unless it takes a single JSON, text or bytea value) and is `not_tested` as not applicable.
 - `SECURITY DEFINER` functions callable by clients are listed in the report with a warning even when no leak was proven, because they run with the owner's rights and skip RLS.
@@ -210,6 +212,7 @@ These come from the catalog and support the probes. They never turn a probe `pas
 - `policy_always_true`: a client policy whose `USING` or `WITH CHECK` is literally `true` (also on `storage.objects`). Reading a shared table with `USING (true)` is normal and not flagged.
 - `policy_ignores_owner`: a client policy on an owned table that does not look at the owner column (the tenant column or a user column; for child tables, the link to the parent). This catches "any member of any organisation" policies that do check `auth.uid()`.
 - `update_without_with_check`: an `UPDATE` (or `ALL`) policy without an explicit `WITH CHECK`, so Postgres reuses `USING` for the new row.
+- The three policy rules above look at permissive policies only. A `RESTRICTIVE` policy is ANDed with the others and can only take rows away (an app-wide "owner-only" switch is a typical example), so it never needs to mention the owner.
 - `view_bypasses_rls`: a client-readable view without `security_invoker = true` whose owner bypasses RLS.
 - `materialized_view_exposed`: a materialized view readable by `anon` or `authenticated`.
 - `security_definer_callable`: a `SECURITY DEFINER` function executable by `anon` or `authenticated`.
@@ -297,6 +300,24 @@ SQL snippets are labelled "starting point: review before applying".
 }
 ```
 
+Two settings for projects whose history is not a clean `supabase/migrations` folder, or whose words differ from the usual model:
+
+```json
+{
+  "tenantRoot": null,
+  "build": {
+    "files": [
+      { "path": "../app/supabase/schema.sql", "version": "20240101000000" },
+      { "path": "../app/supabase/migrations/add_feature.sql", "version": "20240301000001" },
+      { "path": "../app/supabase/migrations/20240401000000_second.sql", "version": "20240401000001" }
+    ]
+  }
+}
+```
+
+- `tenantRoot: null` says the app has no separate tenant table: each signed-in user is one customer (for example a landlord). Tenant-table detection is switched off, and a column merely *named* `tenant_id` is no longer treated as a tenant key (in a landlord app it points at a renter). Ownership then comes from user links: foreign keys to `auth.users`, or inherited through a profile table whose key is the user's id.
+- `build.files` adds SQL files the Supabase CLI would skip (a base `schema.sql`, migrations without a timestamp) to the sandbox, each copied as `<version>_<name>.sql` so it runs at that point in the order. Listing one of the project's own migrations gives it a new version instead (the fix for two migrations sharing a version, which the CLI cannot apply; the tool now names both files up front instead of failing deep inside `supabase start`). Paths are relative to the config file's folder; only `.sql` files are accepted; the target folder is still only read. Each added file is listed in the report's scope notes.
+
 Placeholders accepted in `rpc.args`, `seed.values` and `membership.values`: `{tenantA.tenant}`, `{tenantB.tenant}` (the tenant's id), `{tenantA.user}`, `{tenantB.user}` (the test user's id) and `{tenantA.row:schema.table}`, `{tenantB.row:schema.table}` (the primary key of that tenant's first test row in the table). `storage.pathTemplates` accepts `{tenant}`, `{user}` and `{file}`.
 
 ## 11. Reports
@@ -324,7 +345,7 @@ As built (session 3): renderers live in `src/report/` (`text.ts` shared wording,
 
 The repo includes `.claude/commands/leak-check.md` and `.claude/skills/tenant-leak-check/SKILL.md`, so that saying "run the leak check on <project>" in Claude Code runs `doctor`, then `run` (or `diff` for a migration), then summarises the report in plain English with the disclaimer. Nothing is installed into `~/.claude`.
 
-As built (session 3): the source of both files is `integrations/claude-code/`. The build harness treats writes to `.claude/` as sensitive and could not get approval in a non-interactive session, so the copy into `.claude/` is a one-line step for a person (`integrations/claude-code/README.md`). The unit tests check that both files only name real CLI commands and options, explain every exit code, keep the safety rules and the disclaimer, and that any `.claude/` copy is identical to the source.
+As built (session 3): the source of both files is `integrations/claude-code/`. The build harness treats writes to `.claude/` as sensitive and could not get approval in a non-interactive session, so the copy into `.claude/` is a one-line step for a person (`integrations/claude-code/README.md`). The unit tests check that both files only name real CLI commands and options, explain every exit code, keep the safety rules and the disclaimer, and that any `.claude/` copy is identical to the source. Session 4 hit the same approval wall, so the copy is still the person's one-line step.
 
 ## 14. Build plan
 
@@ -334,3 +355,13 @@ As built (session 3): the source of both files is `integrations/claude-code/`. T
 | 2 | Sandbox and stack manager, discovery, tenancy model, seeding, the probe matrix (tables, views, storage, RPCs) for tenant A and anon, the broken and fixed demos with the leak manifest, unit and integration tests. |
 | 3 | Migration mode, JSON, Markdown and HTML reports with the schema doc, exit codes wired end to end, the Claude Code command and skill. |
 | 4 | A run against a real-world SaaS project (synthetic data only), README for non-coders, final tests. |
+
+### 14.1 What a real-world project taught
+
+A real product's history is messier than the demos, and each lesson became a generic feature or fix rather than a special case for one project:
+
+- **History not in CLI form.** A base schema kept in `supabase/schema.sql` outside the migrations folder, migrations without a timestamp, and two migrations sharing a version mean `supabase db reset` cannot rebuild the database. Added `build.files` (section 10) and an up-front duplicate-version check that names both files.
+- **"Tenant" means renter.** In a property-management app, auto-detection picked `public.tenants` (renters) as the customer table and produced false leaks. Added `tenantRoot: null` (section 10): each signed-in user (landlord) is one customer, and a column merely named `tenant_id` is not a tenant key.
+- **Restrictive policies.** An app-wide switch written as a `RESTRICTIVE` policy on every table made the policy rules flag every table. The rules now skip restrictive policies (section 7.5).
+- **Refusals raised as P0002.** PostgREST answers some `RAISE`s with HTTP 500, which made deliberate refusals look like crashes. SQLSTATE class `P0` now counts as the function refusing (section 7.4).
+- **`col = 'literal'` CHECKs** are now read by the value generator (section 7.1).

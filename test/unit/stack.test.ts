@@ -139,6 +139,60 @@ describe("sandbox", () => {
     const noMigrations = await makeProject({ "supabase/config.toml": "" });
     await assert.rejects(prepareSandbox({ projectDir: noMigrations, workdir: scratch }), /No migration files/);
   });
+
+  it("slots build files into the migration order and can give a project migration a new version", async () => {
+    const project = await makeProject({
+      "supabase/schema.sql": "create table base (id int);",
+      "supabase/migrations/add_extra.sql": "alter table base add column x int;",
+      "supabase/migrations/20240101000000_init.sql": "create table t (id int);",
+      "supabase/migrations/20240102000000_a.sql": "select 1;",
+      "supabase/migrations/20240102000000_b.sql": "select 2;",
+    });
+    const workdir = await mkdtemp(join(scratch, "unit-work-"));
+    await assert.rejects(
+      prepareSandbox({ projectDir: project, workdir }),
+      (error: unknown) =>
+        error instanceof ToolError &&
+        /Two migrations share the version 20240102000000: 20240102000000_a\.sql and 20240102000000_b\.sql/.test(error.message) &&
+        /build\.files/.test(error.hint ?? ""),
+    );
+    const migrations = join(project, "supabase", "migrations");
+    const sandbox = await prepareSandbox({
+      projectDir: project,
+      workdir,
+      buildFiles: [
+        { path: join(project, "supabase", "schema.sql"), version: "20230101000000" },
+        { path: join(migrations, "add_extra.sql"), version: "20240101000001" },
+        { path: join(migrations, "20240102000000_b.sql"), version: "20240102000001" },
+      ],
+    });
+    assert.deepEqual(sandbox.migrations, [
+      "20230101000000_schema.sql",
+      "20240101000000_init.sql",
+      "20240101000001_add_extra.sql",
+      "20240102000000_a.sql",
+      "20240102000001_b.sql",
+    ]);
+    assert.deepEqual((await readdir(join(sandbox.dir, "supabase", "migrations"))).sort(), sandbox.migrations);
+    assert.equal(await readFile(join(sandbox.dir, "supabase", "migrations", "20230101000000_schema.sql"), "utf8"), "create table base (id int);");
+    assert.match(sandbox.settings.notes.join(" "), /Applied the migration 20240102000000_b\.sql as 20240102000001_b\.sql/);
+    assert.match(sandbox.settings.notes.join(" "), /schema\.sql to the build as 20230101000000_schema\.sql/);
+    // The project folder itself is never written to.
+    assert.deepEqual((await readdir(migrations)).sort(), ["20240101000000_init.sql", "20240102000000_a.sql", "20240102000000_b.sql", "add_extra.sql"]);
+  });
+
+  it("explains a missing build file and a build file that clashes with a migration", async () => {
+    const project = await makeProject({ "supabase/migrations/20240101000000_init.sql": "select 1;", "supabase/init.sql": "select 2;" });
+    const workdir = await mkdtemp(join(scratch, "unit-work-"));
+    await assert.rejects(
+      prepareSandbox({ projectDir: project, workdir, buildFiles: [{ path: join(project, "nope.sql"), version: "1" }] }),
+      /build file .*nope\.sql .*does not exist/,
+    );
+    await assert.rejects(
+      prepareSandbox({ projectDir: project, workdir, buildFiles: [{ path: join(project, "supabase", "init.sql"), version: "20240101000000" }] }),
+      /clashes with a migration of the same name/,
+    );
+  });
 });
 
 describe("supabase CLI wrapper", () => {

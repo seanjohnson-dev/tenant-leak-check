@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { ToolError } from "../core/errors.ts";
 
 export const CONFIG_FILE_NAME = "tenant-leak-check.json";
@@ -24,9 +24,19 @@ export interface MembershipConfig {
   values?: Record<string, ConfigValue>;
 }
 
+/** An extra SQL file applied as if it were a migration with the given version (DESIGN.md section 10). */
+export interface BuildFile {
+  /** Absolute path (relative paths in the file are resolved against the config file's folder). */
+  path: string;
+  /** Digits only; decides where the file runs among the project's `<version>_<name>.sql` migrations. */
+  version: string;
+}
+
 export interface ToolConfig {
+  build: { files: BuildFile[] };
   tables: Record<string, TableConfig>;
-  tenantRoot?: string;
+  /** The tenant table. `null` means there is none: each user is one customer (no detection is tried). */
+  tenantRoot?: string | null;
   membership?: MembershipConfig;
   seed: { values: Record<string, ConfigValue> };
   storage: { allowPublic: string[]; pathTemplates?: string[] };
@@ -37,7 +47,7 @@ export interface ToolConfig {
 
 /** The config used when the project has no config file: everything is detected automatically. */
 export function emptyConfig(): ToolConfig {
-  return { tables: {}, seed: { values: {} }, storage: { allowPublic: [] }, rpc: { skip: {}, args: {} } };
+  return { build: { files: [] }, tables: {}, seed: { values: {} }, storage: { allowPublic: [] }, rpc: { skip: {}, args: {} } };
 }
 
 /** Placeholders accepted in `rpc.args` and `seed.values`. */
@@ -144,19 +154,40 @@ function tableConfig(value: unknown, path: string): TableConfig {
   return config;
 }
 
-/** Validates parsed JSON and returns a complete config. Throws a ToolError naming the offending key. */
+function buildFile(value: unknown, path: string, baseDir: string): BuildFile {
+  const raw = object(value, path, ["path", "version"]);
+  const file = text(raw.path, `${path}.path`);
+  if (!file.toLowerCase().endsWith(".sql")) fail(`${path}.path`, `"${file}" must be a .sql file`);
+  const version = text(raw.version, `${path}.version`);
+  if (!/^\d+$/.test(version)) fail(`${path}.version`, `"${version}" must be digits only, like a migration timestamp (for example 20240101000000)`);
+  return { path: resolve(baseDir, file), version };
+}
+
+/**
+ * Validates parsed JSON and returns a complete config. Throws a ToolError naming the offending key.
+ * Relative `build.files` paths are resolved against the config file's folder (the current folder when there is no file).
+ */
 export function validateConfig(raw: unknown, source?: string): ToolConfig {
   try {
-    const top = object(raw, "config", ["$schema", "tables", "tenantRoot", "membership", "seed", "storage", "rpc"]);
+    const top = object(raw, "config", ["$schema", "build", "tables", "tenantRoot", "membership", "seed", "storage", "rpc"]);
     const config = emptyConfig();
     if (source) config.source = source;
+    if (top.build !== undefined) {
+      const build = object(top.build, "config.build", ["files"]);
+      if (build.files !== undefined) {
+        if (!Array.isArray(build.files)) fail("config.build.files", "must be a list of { path, version } entries");
+        const baseDir = source ? dirname(source) : process.cwd();
+        config.build.files = build.files.map((item, index) => buildFile(item, `config.build.files[${index}]`, baseDir));
+      }
+    }
     if (top.tables !== undefined) {
       for (const [name, value] of Object.entries(record(top.tables, "config.tables"))) {
         const key = qualifiedName(name, `config.tables["${name}"]`);
         config.tables[key] = tableConfig(value, `config.tables["${name}"]`);
       }
     }
-    if (top.tenantRoot !== undefined) config.tenantRoot = qualifiedName(top.tenantRoot, "config.tenantRoot");
+    if (top.tenantRoot === null) config.tenantRoot = null;
+    else if (top.tenantRoot !== undefined) config.tenantRoot = qualifiedName(top.tenantRoot, "config.tenantRoot");
     if (top.membership !== undefined) {
       const m = object(top.membership, "config.membership", ["table", "userColumn", "tenantColumn", "values"]);
       const membership: MembershipConfig = {

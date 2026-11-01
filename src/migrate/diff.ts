@@ -324,7 +324,12 @@ export async function runDiff(options: DiffOptions): Promise<DiffResult> {
   const config = await loadConfig(options.projectDir, options.configPath);
   const files = await readMigrationFiles(options.migrations);
   const names = files.map((file) => file.name);
-  const baseline = await prepareSandbox({ projectDir: options.projectDir, workdir: options.workdir, excludeMigrations: names });
+  const baseline = await prepareSandbox({
+    projectDir: options.projectDir,
+    workdir: options.workdir,
+    excludeMigrations: names,
+    buildFiles: config.build.files,
+  });
   assertAppliedLast(baseline.migrations, names);
   const stack = options.stack ?? new StackManager({ log });
   const shared = { config, toolVersion: options.toolVersion, log };
@@ -339,6 +344,7 @@ export async function runDiff(options: DiffOptions): Promise<DiffResult> {
       workdir: options.workdir,
       excludeMigrations: names,
       extraMigrations: files.map((file) => file.path),
+      buildFiles: config.build.files,
     });
     current = afterSandbox;
     log(`Step 2 of 3: applying ${names.join(", ")} on top of the test data.`);

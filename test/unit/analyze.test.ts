@@ -52,6 +52,18 @@ describe("static rules", () => {
     assert.ok(!rules.some((r) => r.includes("Read plans")), "reading shared reference data is fine");
   });
 
+  it("does not flag RESTRICTIVE policies, which can only narrow access", () => {
+    const catalog = catalogWith((c) => {
+      relation(c, "public.invoices").policies = [
+        policy("public.invoices", "Members", "all", { using: MEMBER, withCheck: MEMBER }),
+        policy("public.invoices", "Maintenance mode", "all", { using: "app_open()", permissive: false }),
+        policy("public.invoices", "Always", "select", { using: "true", permissive: false }),
+      ];
+    });
+    const rules = staticWarnings(catalog, buildTenancyModel(catalog, emptyConfig()), emptyConfig()).map((w) => `${w.rule} ${w.object}`);
+    assert.ok(!rules.some((r) => r.includes("Maintenance mode") || r.includes('"Always"')), rules.join("\n"));
+  });
+
   it("flags views that bypass RLS, exposed materialized views, SECURITY DEFINER functions and public buckets", () => {
     const catalog = catalogWith((c) => {
       const view = relation(c, "public.clients");

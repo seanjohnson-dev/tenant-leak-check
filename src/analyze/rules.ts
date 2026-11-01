@@ -85,7 +85,9 @@ export function staticWarnings(catalog: Catalog, tenancy: TenancyModel, config: 
           message: `${relation.qualified} has ${relation.policies.length} polic${relation.policies.length === 1 ? "y" : "ies"}, but row level security is not enabled, so Postgres ignores them.`,
         });
       }
-      for (const policy of relation.policies.filter(appliesToClients)) {
+      // Restrictive policies are ANDed with the permissive ones and can only take rows away,
+      // so they need not mention the owner (for example an app-wide "maintenance mode" switch).
+      for (const policy of relation.policies.filter((p) => p.permissive && appliesToClients(p))) {
         const sharedRead = ownership?.kind === "shared" && policy.command === "select";
         if (!sharedRead && (isLiteralTrue(policy.using) || isLiteralTrue(policy.withCheck))) {
           warnings.push({

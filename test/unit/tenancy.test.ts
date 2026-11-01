@@ -76,6 +76,27 @@ describe("tenancy model", () => {
     assert.equal(named.tenantRoot, undefined);
   });
 
+  it("with tenantRoot: null, treats each user as one customer even when tables have tenant_id columns", () => {
+    // A landlord app: "tenants" are renters, and every row belongs to a landlord (a user).
+    const catalog = catalogOf([
+      table("public.profiles", [col("id", "uuid", { notNull: true })], [pk("id"), fk("id", "auth.users")]),
+      table("public.tenants", [col("id", "uuid"), col("landlord_id", "uuid")], [pk("id"), fk("landlord_id", "profiles")]),
+      table("public.invoices", [col("id", "uuid"), col("landlord_id", "uuid"), col("tenant_id", "uuid")], [pk("id"), fk("landlord_id", "profiles"), fk("tenant_id", "tenants")]),
+      table("public.drafts", [col("id", "uuid"), col("user_id", "uuid"), col("tenant_id", "text")], [pk("id"), fk("user_id", "auth.users")]),
+    ]);
+    const detected = buildTenancyModel(catalog, emptyConfig());
+    assert.equal(detected.tenantRoot?.table, "public.tenants");
+    const model = buildTenancyModel(catalog, validateConfig({ tenantRoot: null }));
+    assert.equal(model.tenantRoot, undefined);
+    assert.equal(model.membership, undefined);
+    assert.match(model.notes.join(" "), /no separate tenant table/);
+    const invoices = model.tables.get("public.invoices")?.ownership;
+    assert.equal(invoices?.kind, "inherited");
+    if (invoices?.kind === "inherited") assert.deepEqual(invoices.path, ["public.invoices", "public.profiles"]);
+    assert.equal(kindOf(model, "public.tenants"), "inherited");
+    assert.deepEqual(model.tables.get("public.drafts")?.ownership, { kind: "user", userColumn: "user_id", source: "foreign_key" });
+  });
+
   it("lets the config override every rule", () => {
     const config = validateConfig({
       tables: {

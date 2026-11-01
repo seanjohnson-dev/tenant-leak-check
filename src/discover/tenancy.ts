@@ -159,7 +159,9 @@ function directOwnership(relation: Relation, root: string | undefined, config: T
     };
   }
   const fkColumns = new Set(fks.flatMap((fk) => fk.columns));
-  const named = TENANT_COLUMN_NAMES.find((name) => hasColumn(relation, name) && !fkColumns.has(name));
+  // With no tenant table (tenantRoot: null) a column merely named tenant_id cannot hold a tenant's id.
+  const named =
+    config.tenantRoot === null ? undefined : TENANT_COLUMN_NAMES.find((name) => hasColumn(relation, name) && !fkColumns.has(name));
   if (named) {
     return {
       ownership: { kind: "tenant", tenantColumn: named, userColumns, source: "name" },
@@ -225,11 +227,17 @@ export function buildTenancyModel(catalog: Catalog, config: ToolConfig): Tenancy
     }
   }
 
-  let root = config.tenantRoot;
-  if (root !== undefined && !byName.has(root)) {
-    throw new ToolError(`The config sets tenantRoot to ${root}, but no such table exists in the exposed schemas.`);
+  let root: string | undefined;
+  if (config.tenantRoot === null) {
+    notes.push("The config says there is no separate tenant table: each signed-in user is one customer.");
+  } else if (config.tenantRoot !== undefined) {
+    root = config.tenantRoot;
+    if (!byName.has(root)) {
+      throw new ToolError(`The config sets tenantRoot to ${root}, but no such table exists in the exposed schemas.`);
+    }
+  } else {
+    root = detectTenantRoot(tables);
   }
-  root ??= detectTenantRoot(tables);
   let tenantRoot: TenancyModel["tenantRoot"];
   if (root) {
     const relation = byName.get(root) as Relation;

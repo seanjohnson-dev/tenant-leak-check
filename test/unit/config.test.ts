@@ -83,3 +83,39 @@ describe("config validation", () => {
     await assert.rejects(loadConfig(dir, join(dir, "bad.json")), /not valid JSON/);
   });
 });
+
+describe("config: build files and tenantRoot null", () => {
+  it("resolves build.files paths against the config file's folder and keeps their order", () => {
+    const config = validateConfig(
+      {
+        build: {
+          files: [
+            { path: "../app/supabase/schema.sql", version: "20240101000000" },
+            { path: "/abs/shim.sql", version: "20240102000000" },
+          ],
+        },
+      },
+      "/work/configs/tenant-leak-check.json",
+    );
+    assert.deepEqual(config.build.files, [
+      { path: "/work/app/supabase/schema.sql", version: "20240101000000" },
+      { path: "/abs/shim.sql", version: "20240102000000" },
+    ]);
+    assert.deepEqual(emptyConfig().build.files, []);
+  });
+
+  it("rejects build files that are not .sql, have a non-numeric version, or are not a list", () => {
+    problem({ build: { files: [{ path: "supabase/.env", version: "1" }] } }, /build\.files\[0\]\.path: .*must be a \.sql file/);
+    problem({ build: { files: [{ path: "schema.sql", version: "v1" }] } }, /build\.files\[0\]\.version: .*digits only/);
+    problem({ build: { files: [{ path: "schema.sql" }] } }, /build\.files\[0\]\.version: must be a non-empty text value/);
+    problem({ build: { files: [{ path: "schema.sql", version: "1", extra: true }] } }, /build\.files\[0\]\.extra: unknown setting/);
+    problem({ build: { files: "schema.sql" } }, /config\.build\.files: must be a list/);
+    problem({ build: { order: [] } }, /config\.build\.order: unknown setting/);
+  });
+
+  it("accepts tenantRoot: null (no tenant table) and still checks a named one", () => {
+    assert.equal(validateConfig({ tenantRoot: null }).tenantRoot, null);
+    assert.equal(validateConfig({}).tenantRoot, undefined);
+    problem({ tenantRoot: "not a table!" }, /config\.tenantRoot/);
+  });
+});

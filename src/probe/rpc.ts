@@ -4,7 +4,7 @@ import { primaryKey, TENANT_COLUMN_NAMES, USER_COLUMN_NAMES } from "../discover/
 import { ownerOf, resolvePlaceholder, rowsOf } from "../seed/rows.ts";
 import { randomTag } from "../seed/values.ts";
 import { ACTORS, actorName, callerFor, findMarkers, foreignMarkers, type ProbeContext } from "./common.ts";
-import { evidenceOf, excerpt } from "./http.ts";
+import { evidenceOf, excerpt, type HttpResponse } from "./http.ts";
 
 /** Types PostgREST accepts as a single unnamed argument (the raw request body). */
 const RAW_BODY_TYPES = new Set(["json", "jsonb", "text", "bytea", "xml"]);
@@ -159,18 +159,26 @@ export async function probeFunction(ctx: ProbeContext, fn: FunctionInfo): Promis
     }
     evidence.after = "No other tenant's data came back, and the database shows no other tenant's rows changed.";
     evidence.summary = `${actorName(actor)} called ${fn.qualified} without reaching another tenant's data.`;
-    if (response.networkError || response.status >= 500) {
-      checks.push(inconclusive(spec, response.networkError ? `The API gave no answer (${response.networkError}).` : `The function failed with a server error (HTTP ${response.status}).`, evidence));
-    } else if (!ok && response.errorCode?.startsWith("PGRST")) {
-      checks.push(
-        inconclusive(spec, `The API could not run the function (${response.errorCode}${response.errorMessage ? `: ${response.errorMessage}` : ""}).`, evidence),
-      );
-    } else if (!ok) {
-      const denied = response.errorCode === "42501" || response.status === 401 || response.status === 403;
-      checks.push(passed(spec, evidence, [denied ? "Blocked by permissions." : `The function refused the call: ${response.errorMessage ?? `HTTP ${response.status}`}.`]));
-    } else {
-      checks.push(passed(spec, evidence));
-    }
+    const outcome = quietCallOutcome(response);
+    checks.push(outcome.pass ? passed(spec, evidence, outcome.notes) : inconclusive(spec, outcome.reason, evidence));
   }
   return checks;
+}
+
+export type QuietCallOutcome = { pass: true; notes: string[] } | { pass: false; reason: string };
+
+/** The verdict for a call that returned no other tenant's data and changed none of it. */
+export function quietCallOutcome(response: Pick<HttpResponse, "status" | "networkError" | "errorCode" | "errorMessage">): QuietCallOutcome {
+  if (response.networkError) return { pass: false, reason: `The API gave no answer (${response.networkError}).` };
+  if (response.status >= 200 && response.status < 300) return { pass: true, notes: [] };
+  // A RAISE inside the function (SQLSTATE class P0, for example P0002) is the function refusing,
+  // even though PostgREST answers some of them with HTTP 500. Other server errors stay unclear.
+  const raised = /^P0\d{3}$/.test(response.errorCode ?? "");
+  if (response.status >= 500 && !raised) return { pass: false, reason: `The function failed with a server error (HTTP ${response.status}).` };
+  if (response.errorCode?.startsWith("PGRST")) {
+    return { pass: false, reason: `The API could not run the function (${response.errorCode}${response.errorMessage ? `: ${response.errorMessage}` : ""}).` };
+  }
+  const denied = response.errorCode === "42501" || response.status === 401 || response.status === 403;
+  const message = (response.errorMessage ?? `HTTP ${response.status}`).replace(/[.!?]+$/, "");
+  return { pass: true, notes: [denied ? "Blocked by permissions." : `The function refused the call: ${message}.`] };
 }

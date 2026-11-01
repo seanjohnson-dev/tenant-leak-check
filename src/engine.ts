@@ -266,7 +266,7 @@ export async function stopUnlessKept(stack: StackManager, sandbox: Sandbox, keep
 export async function runCheck(options: RunOptions): Promise<RunResult> {
   const log = options.log ?? (() => {});
   const config: ToolConfig = await loadConfig(options.projectDir, options.configPath);
-  const sandbox = await prepareSandbox({ projectDir: options.projectDir, workdir: options.workdir });
+  const sandbox = await prepareSandbox({ projectDir: options.projectDir, workdir: options.workdir, buildFiles: config.build.files });
   const stack = options.stack ?? new StackManager({ log });
   log(`Building a local copy of ${sandbox.projectDir} from ${sandbox.migrations.length} migration file${sandbox.migrations.length === 1 ? "" : "s"}.`);
   const credentials = await stack.ensureFresh(sandbox);

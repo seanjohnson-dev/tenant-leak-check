@@ -4,7 +4,7 @@ import { emptyConfig } from "../../src/config/config.ts";
 import { buildTenancyModel } from "../../src/discover/tenancy.ts";
 import { classifyResponse, findMarkers, firstLeakedItem, type ProbeContext, restTarget } from "../../src/probe/common.ts";
 import { ApiClient, evidenceOf, excerpt, redact } from "../../src/probe/http.ts";
-import { fillArg, normalizeArgName, tableForArg } from "../../src/probe/rpc.ts";
+import { fillArg, normalizeArgName, quietCallOutcome, tableForArg } from "../../src/probe/rpc.ts";
 import { rowFilter } from "../../src/probe/tables.ts";
 import { canaryPaths, pickContentType } from "../../src/seed/files.ts";
 import type { SeedResult } from "../../src/seed/rows.ts";
@@ -93,6 +93,34 @@ describe("storage canaries", () => {
     assert.equal(pickContentType(["text/*"]), "text/plain");
     assert.equal(pickContentType(["image/*"]), "image/png");
     assert.equal(pickContentType(["application/pdf"]), "application/pdf");
+  });
+});
+
+describe("rpc verdict when no other tenant's data was reached", () => {
+  it("passes successful calls, refusals and permission denials", () => {
+    assert.deepEqual(quietCallOutcome({ status: 200 }), { pass: true, notes: [] });
+    assert.deepEqual(quietCallOutcome({ status: 400, errorCode: "P0001", errorMessage: "Not your invoice" }), {
+      pass: true,
+      notes: ["The function refused the call: Not your invoice."],
+    });
+    assert.deepEqual(quietCallOutcome({ status: 403, errorCode: "42501" }), { pass: true, notes: ["Blocked by permissions."] });
+  });
+
+  it("treats a RAISE that PostgREST answers with HTTP 500 (SQLSTATE P0002) as the function refusing", () => {
+    assert.deepEqual(quietCallOutcome({ status: 500, errorCode: "P0002", errorMessage: "Invoice not found on this account." }), {
+      pass: true,
+      notes: ["The function refused the call: Invoice not found on this account."],
+    });
+  });
+
+  it("stays unclear for crashes, missing answers and PostgREST errors", () => {
+    assert.deepEqual(quietCallOutcome({ status: 500, errorCode: "XX000" }), { pass: false, reason: "The function failed with a server error (HTTP 500)." });
+    assert.deepEqual(quietCallOutcome({ status: 500 }), { pass: false, reason: "The function failed with a server error (HTTP 500)." });
+    assert.equal(quietCallOutcome({ status: 0, networkError: "timeout" }).pass, false);
+    assert.deepEqual(quietCallOutcome({ status: 404, errorCode: "PGRST202", errorMessage: "not found" }), {
+      pass: false,
+      reason: "The API could not run the function (PGRST202: not found).",
+    });
   });
 });
 

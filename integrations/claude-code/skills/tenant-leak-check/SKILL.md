@@ -43,5 +43,6 @@ description: Run the tenant isolation check ("run the leak check") on a Supabase
 ## Afterwards
 
 - Do not change the target project's policies or migrations unless the user asks. The SQL in each finding is a starting point to review, not a patch to apply blindly.
-- If the tenancy model in the report is wrong (a table is linked to the wrong owner), suggest a `tenant-leak-check.json` override in the project folder (see `docs/DESIGN.md` section 10) and run the check again.
+- If the tenancy model in the report is wrong (a table is linked to the wrong owner, or "tenant" means something else in this app, such as a renter), suggest a `tenant-leak-check.json` override (see `docs/DESIGN.md` section 10) and run the check again. Keep the file outside the target project and pass it with `--config <file>` unless the user asks you to add it to the project.
+- If the build fails because the project's history is not a plain `supabase/migrations` folder (a separate `schema.sql`, migrations without a timestamp, two migrations with the same version), explain it and suggest `build.files` in that config file. Never rename or edit the project's own files.
 - The tool stops its local stack when it finishes. If a run was interrupted, the next run cleans up its own `tlc-*` stacks.

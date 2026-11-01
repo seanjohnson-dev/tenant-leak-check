@@ -163,6 +163,8 @@ describe("writing reports", () => {
   it("redaction leaves ordinary text alone", () => {
     assert.equal(redactReport("public.invoices row (id=b-1) belongs to tenant B"), "public.invoices row (id=b-1) belongs to tenant B");
     assert.equal(redactReport("postgresql://postgres:secret@127.0.0.1/db"), "postgresql://[redacted]@127.0.0.1/db");
+    assert.equal(redactReport("url postgres://user:p@ss@127.0.0.1:5432/db here"), "url postgres://[redacted]@127.0.0.1:5432/db here");
+    assert.equal(redactReport('"postgres://user:pa/ss@localhost/db"'), '"postgres://[redacted]@localhost/db"');
   });
 
   it("explains a folder it cannot write to", async () => {

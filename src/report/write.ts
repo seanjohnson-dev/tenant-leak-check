@@ -22,7 +22,8 @@ export interface ReportPaths {
  * rendered file once more after it (DESIGN.md section 11).
  */
 export function redactReport(text: string): string {
-  return redact(text).replace(/(postgres(?:ql)?:\/\/)[^\s"'<>@/]+@/g, "$1[redacted]@");
+  // Greedy up to the last "@" of the URL, so a password that itself holds "@" or "/" is covered too.
+  return redact(text).replace(/(postgres(?:ql)?:\/\/)[^\s"'<>]+@/g, "$1[redacted]@");
 }
 
 /** Redacts every string inside a value, so each renderer starts from clean data whatever its escaping. */

@@ -104,7 +104,9 @@ export function parseCheckHints(column: string, definitions: readonly string[]):
       const values: (string | number)[] = strings.length > 0 ? strings : [...list[1].matchAll(/-?\d+(?:\.\d+)?/g)].map((m) => Number(m[0]));
       if (values.length > 0) hints.allowed = values;
     } else {
-      const equal = new RegExp(`(?<!NOT\\s*\\(?\\s*)${col}\\s*=\\s*'((?:[^']|'')*)'`, "i").exec(text);
+      // Only when it is the whole constraint: inside a larger expression (for example
+      // (status = 'closed') = (closed_at IS NOT NULL)) the literal is not the only allowed value.
+      const equal = new RegExp(`^${col}\\s*=\\s*'((?:[^']|'')*)'$`, "i").exec(text);
       if (equal?.[1] !== undefined) hints.allowed = [equal[1].replaceAll("''", "'")];
     }
     const lengthFn = `(?:char_length|character_length|length)\\(\\s*${col}\\s*\\)`;

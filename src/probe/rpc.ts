@@ -137,8 +137,8 @@ export async function probeFunction(ctx: ProbeContext, fn: FunctionInfo): Promis
       }
     }
     const markers = new Set([...foreignMarkers(ctx, actor)].filter((marker) => !sent.has(marker)));
-    const ok = response.status >= 200 && response.status < 300;
-    const found = ok ? findMarkers(response.text, markers) : [];
+    // Error answers are searched too: an error message that quotes tenant B's data is a read leak.
+    const found = findMarkers(response.text, markers);
     const evidence: Evidence = {
       actor,
       requests: [request],
@@ -171,9 +171,10 @@ export type QuietCallOutcome = { pass: true; notes: string[] } | { pass: false; 
 export function quietCallOutcome(response: Pick<HttpResponse, "status" | "networkError" | "errorCode" | "errorMessage">): QuietCallOutcome {
   if (response.networkError) return { pass: false, reason: `The API gave no answer (${response.networkError}).` };
   if (response.status >= 200 && response.status < 300) return { pass: true, notes: [] };
-  // A RAISE inside the function (SQLSTATE class P0, for example P0002) is the function refusing,
-  // even though PostgREST answers some of them with HTTP 500. Other server errors stay unclear.
-  const raised = /^P0\d{3}$/.test(response.errorCode ?? "");
+  // A RAISE inside the function (P0001 raise_exception, P0002 no_data_found) is the function
+  // refusing, even though PostgREST answers P0002 with HTTP 500. P0003 (too many rows) and
+  // P0004 (assert failure) are crashes, and like other server errors they stay unclear.
+  const raised = response.errorCode === "P0001" || response.errorCode === "P0002";
   if (response.status >= 500 && !raised) return { pass: false, reason: `The function failed with a server error (HTTP ${response.status}).` };
   if (response.errorCode?.startsWith("PGRST")) {
     return { pass: false, reason: `The API could not run the function (${response.errorCode}${response.errorMessage ? `: ${response.errorMessage}` : ""}).` };

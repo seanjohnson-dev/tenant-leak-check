@@ -6,7 +6,7 @@ import { MigrationsFailed, ToolError } from "../core/errors.ts";
 import { combineExitCodes, EXIT, type ExitCode } from "../core/exit-codes.ts";
 import { type CheckResult, summarize, type Summary, type Verdict } from "../core/results.ts";
 import { checkSandbox, type RunResult, type SandboxCheck, stopUnlessKept } from "../engine.ts";
-import { prepareSandbox, type Sandbox } from "../stack/sandbox.ts";
+import { prepareSandbox, type Sandbox, sandboxMigrationName } from "../stack/sandbox.ts";
 import { StackManager } from "../stack/supabase.ts";
 import { type CatalogChange, type CatalogChangeKind, diffCatalogs } from "./catalog-diff.ts";
 import { diffResults, type ResultDiff } from "./result-diff.ts";
@@ -330,7 +330,10 @@ export async function runDiff(options: DiffOptions): Promise<DiffResult> {
     excludeMigrations: names,
     buildFiles: config.build.files,
   });
-  assertAppliedLast(baseline.migrations, names);
+  assertAppliedLast(
+    baseline.migrations,
+    files.map((file) => sandboxMigrationName(file.path, config.build.files)),
+  );
   const stack = options.stack ?? new StackManager({ log });
   const shared = { config, toolVersion: options.toolVersion, log };
   log(`Step 1 of 3: testing ${baseline.projectDir} before the migration (${plural(baseline.migrations.length, "existing migration file")}).`);

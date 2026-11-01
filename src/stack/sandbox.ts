@@ -286,14 +286,27 @@ export function buildFileName(file: BuildFile): string {
   return `${file.version}_${name}`;
 }
 
+/**
+ * The name a migration file gets in the sandbox: its own name, or its `build.files` name when
+ * the config gives it a new version (so migration mode orders and applies it the same way).
+ */
+export function sandboxMigrationName(path: string, buildFiles: readonly BuildFile[]): string {
+  const absolute = resolve(path);
+  const listed = buildFiles.find((file) => resolve(file.path) === absolute);
+  return listed ? buildFileName(listed) : basename(absolute);
+}
+
 async function copyBuildFiles(
   files: readonly BuildFile[],
   migrationsDir: string,
   sandboxMigrations: string,
   migrations: string[],
   notes: string[],
+  isLeftOut: (path: string) => boolean,
 ): Promise<void> {
   for (const file of files) {
+    // Migration mode leaves the migration under test out of the "before" build and adds it as an extra.
+    if (isLeftOut(file.path)) continue;
     if (!existsSync(file.path) || !(await stat(file.path)).isFile()) {
       throw new ToolError(
         `The build file ${file.path} (from build.files in the config) does not exist.`,
@@ -332,7 +345,7 @@ function assertUniqueVersions(migrations: readonly string[]): void {
     if (earlier) {
       throw new ToolError(
         `Two migrations share the version ${version}: ${earlier} and ${name}. The Supabase CLI cannot apply both to a fresh database.`,
-        `Rename one of them in the project, or give one of them an unused version for this check with build.files in the config: { "path": "supabase/migrations/${name}", "version": "<unused version>" }.`,
+        `Rename one of them in the project, or give one of them an unused version for this check with build.files in the config: { "path": "<path to ${name}, from the config file's folder>", "version": "<unused version>" }.`,
       );
     }
     seen.set(version, name);
@@ -380,9 +393,11 @@ export async function prepareSandbox(options: SandboxOptions): Promise<Sandbox> 
     await copyFile(join(migrationsDir, name), join(sandboxMigrations, name));
     migrations.push(name);
   }
-  await copyBuildFiles(buildFiles, migrationsDir, sandboxMigrations, migrations, settings.notes);
+  const isLeftOut = (path: string): boolean =>
+    extras.includes(resolve(path)) || (resolve(dirname(path)) === migrationsDir && excluded.has(basename(path)));
+  await copyBuildFiles(buildFiles, migrationsDir, sandboxMigrations, migrations, settings.notes, isLeftOut);
   for (const path of extras) {
-    const name = basename(path);
+    const name = sandboxMigrationName(path, buildFiles);
     if (!/^\d+_.*\.sql$/.test(name)) {
       throw new ToolError(
         `The migration ${name} is not named like a Supabase migration.`,

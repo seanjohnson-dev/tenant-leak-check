@@ -11,6 +11,7 @@ import {
   parseTargetSettings,
   prepareSandbox,
   SANDBOX_PORTS,
+  sandboxMigrationName,
   sandboxSlug,
   selectMigrationFiles,
 } from "../../src/stack/sandbox.ts";
@@ -179,6 +180,30 @@ describe("sandbox", () => {
     assert.match(sandbox.settings.notes.join(" "), /schema\.sql to the build as 20230101000000_schema\.sql/);
     // The project folder itself is never written to.
     assert.deepEqual((await readdir(migrations)).sort(), ["20240101000000_init.sql", "20240102000000_a.sql", "20240102000000_b.sql", "add_extra.sql"]);
+  });
+
+  it("in migration mode, applies a re-versioned migration under test once, under its build name", async () => {
+    const project = await makeProject({
+      "supabase/migrations/20240101000000_init.sql": "create table t (id int);",
+      "supabase/migrations/20240102000000_a.sql": "select 1;",
+      "supabase/migrations/20240102000000_b.sql": "alter table t add column x int;",
+    });
+    const workdir = await mkdtemp(join(scratch, "unit-work-"));
+    const underTest = join(project, "supabase", "migrations", "20240102000000_b.sql");
+    const buildFiles = [{ path: underTest, version: "20240102000001" }];
+    assert.equal(sandboxMigrationName(underTest, buildFiles), "20240102000001_b.sql");
+    assert.equal(sandboxMigrationName(join(project, "other.sql"), buildFiles), "other.sql");
+    const before = await prepareSandbox({ projectDir: project, workdir, excludeMigrations: ["20240102000000_b.sql"], buildFiles });
+    assert.deepEqual(before.migrations, ["20240101000000_init.sql", "20240102000000_a.sql"]);
+    const after = await prepareSandbox({
+      projectDir: project,
+      workdir,
+      excludeMigrations: ["20240102000000_b.sql"],
+      extraMigrations: [underTest],
+      buildFiles,
+    });
+    assert.deepEqual(after.migrations, ["20240101000000_init.sql", "20240102000000_a.sql", "20240102000001_b.sql"]);
+    assert.deepEqual((await readdir(join(after.dir, "supabase", "migrations"))).sort(), after.migrations);
   });
 
   it("explains a missing build file and a build file that clashes with a migration", async () => {

@@ -106,6 +106,7 @@ describe("config: build files and tenantRoot null", () => {
 
   it("rejects build files that are not .sql, have a non-numeric version, or are not a list", () => {
     problem({ build: { files: [{ path: "supabase/.env", version: "1" }] } }, /build\.files\[0\]\.path: .*must be a \.sql file/);
+    problem({ build: { files: [{ path: "supabase/schema.SQL", version: "1" }] } }, /build\.files\[0\]\.path: .*lower-case \.sql/);
     problem({ build: { files: [{ path: "schema.sql", version: "v1" }] } }, /build\.files\[0\]\.version: .*digits only/);
     problem({ build: { files: [{ path: "schema.sql" }] } }, /build\.files\[0\]\.version: must be a non-empty text value/);
     problem({ build: { files: [{ path: "schema.sql", version: "1", extra: true }] } }, /build\.files\[0\]\.extra: unknown setting/);

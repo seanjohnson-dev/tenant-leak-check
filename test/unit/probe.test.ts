@@ -115,6 +115,9 @@ describe("rpc verdict when no other tenant's data was reached", () => {
 
   it("stays unclear for crashes, missing answers and PostgREST errors", () => {
     assert.deepEqual(quietCallOutcome({ status: 500, errorCode: "XX000" }), { pass: false, reason: "The function failed with a server error (HTTP 500)." });
+    // SELECT ... INTO STRICT finding several rows, and a failed ASSERT, are crashes rather than refusals.
+    assert.equal(quietCallOutcome({ status: 500, errorCode: "P0003", errorMessage: "query returned more than one row" }).pass, false);
+    assert.equal(quietCallOutcome({ status: 500, errorCode: "P0004", errorMessage: "assertion failed" }).pass, false);
     assert.deepEqual(quietCallOutcome({ status: 500 }), { pass: false, reason: "The function failed with a server error (HTTP 500)." });
     assert.equal(quietCallOutcome({ status: 0, networkError: "timeout" }).pass, false);
     assert.deepEqual(quietCallOutcome({ status: 404, errorCode: "PGRST202", errorMessage: "not found" }), {

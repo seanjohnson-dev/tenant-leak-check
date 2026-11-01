@@ -157,7 +157,8 @@ function tableConfig(value: unknown, path: string): TableConfig {
 function buildFile(value: unknown, path: string, baseDir: string): BuildFile {
   const raw = object(value, path, ["path", "version"]);
   const file = text(raw.path, `${path}.path`);
-  if (!file.toLowerCase().endsWith(".sql")) fail(`${path}.path`, `"${file}" must be a .sql file`);
+  // Case-sensitive, like the Supabase CLI's own migration file pattern.
+  if (!file.endsWith(".sql")) fail(`${path}.path`, `"${file}" must be a .sql file (lower-case .sql, as the Supabase CLI expects)`);
   const version = text(raw.version, `${path}.version`);
   if (!/^\d+$/.test(version)) fail(`${path}.version`, `"${version}" must be digits only, like a migration timestamp (for example 20240101000000)`);
   return { path: resolve(baseDir, file), version };

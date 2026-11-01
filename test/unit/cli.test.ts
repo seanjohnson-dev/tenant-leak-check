@@ -50,6 +50,30 @@ describe("cli", () => {
     assert.match(io.stderr.join("\n"), /--prod/);
   });
 
+  it("documents run, diff and the report options in the help", () => {
+    const text = helpText();
+    for (const part of ["run --project", "diff --project <folder> --migration <file.sql>", "--out <folder>", "report.html, report.md and report.json", "doctor"]) {
+      assert.ok(text.includes(part), `${part} missing from the help`);
+    }
+  });
+
+  it("diff explains missing or wrong input with exit code 3, before starting anything", async () => {
+    const demo = fileURLToPath(new URL("../../demo/fixed", import.meta.url));
+    const cases: [string[], RegExp][] = [
+      [["diff", "--migration", "x.sql"], /Missing --project/],
+      [["diff", "--project", demo], /Missing --migration/],
+      [["diff", "--project", demo, "--migration", "/nonexistent/20261101000000_x.sql"], /does not exist/],
+      [["diff", "--project", demo, "--migration", fileURLToPath(new URL("../../demo/migrations/README.md", import.meta.url))], /not named like a Supabase migration/],
+      [["diff", "--project", demo, "--migration", fileURLToPath(new URL("../../demo/fixed/supabase/migrations/20261031000001_schema.sql", import.meta.url))], /would run before/],
+      [["run", "--project", demo, "--format", "pdf"], /--format/],
+    ];
+    for (const [args, message] of cases) {
+      const io = capture();
+      assert.equal(await main(args, io), EXIT.toolError, args.join(" "));
+      assert.match(io.stderr.join("\n"), message);
+    }
+  });
+
   it("runs as a real process and returns the exit code", () => {
     const cli = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
     const output = execFileSync(process.execPath, [cli, "--version"], { encoding: "utf8" });

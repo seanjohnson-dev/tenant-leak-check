@@ -93,7 +93,8 @@ export function isFailureToTest(result: CheckResult): boolean {
   return result.status === "inconclusive" || (result.status === "not_tested" && result.notTestedKind === "could_not_test");
 }
 
-export type Verdict = "clean" | "leaks_found" | "inconclusive";
+/** `review_needed` only comes from migration mode: no leaks, but the migration needs a human review (exit code 4). */
+export type Verdict = "clean" | "leaks_found" | "inconclusive" | "review_needed";
 
 export interface Summary {
   verdict: Verdict;

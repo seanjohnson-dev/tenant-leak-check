@@ -1,0 +1,101 @@
+{
+  "description": "What migration mode must report for each demo migration, applied on top of demo/fixed. The integration tests compare these lists exactly (nothing missed, nothing extra); the unit tests check the statement findings without Docker. All data in the demo is synthetic.",
+  "project": "demo/fixed",
+  "cases": [
+    {
+      "id": "bad",
+      "migration": "demo/migrations/bad/20261101090000_housekeeping.sql",
+      "exitCode": 1,
+      "verdict": "leaks_found",
+      "applyOnSeededData": true,
+      "newLeaks": [
+        "table:public.clients:select:tenant_a",
+        "table:public.expenses:select:tenant_a",
+        "table:public.expenses:insert:tenant_a",
+        "table:public.expenses:update:tenant_a",
+        "table:public.expenses:update_reassign:tenant_a",
+        "table:public.expenses:delete:tenant_a",
+        "table:public.expenses:select:anon",
+        "table:public.expenses:insert:anon",
+        "table:public.expenses:update:anon",
+        "table:public.expenses:delete:anon"
+      ],
+      "removedChecks": [
+        "table:public.activity_log:select:tenant_a",
+        "table:public.activity_log:insert:tenant_a",
+        "table:public.activity_log:update:tenant_a",
+        "table:public.activity_log:update_reassign:tenant_a",
+        "table:public.activity_log:delete:tenant_a",
+        "table:public.activity_log:select:anon",
+        "table:public.activity_log:insert:anon",
+        "table:public.activity_log:update:anon",
+        "table:public.activity_log:delete:anon"
+      ],
+      "addedChecks": [],
+      "statements": [
+        { "marker": "R1", "line": 8, "rule": "policy_always_true", "severity": "security", "object": "public.clients: Signed-in users read all clients" },
+        { "marker": "R2", "line": 13, "rule": "disable_rls", "severity": "security", "object": "public.expenses" },
+        { "marker": "R3", "line": 16, "rule": "drop_policy", "severity": "security", "object": "public.quote_requests: Members read their quote requests" },
+        { "marker": "R4", "line": 19, "rule": "drop_column", "severity": "destructive", "object": "public.contacts.email" },
+        { "marker": "R5", "line": 22, "rule": "drop_table", "severity": "destructive", "object": "public.activity_log" },
+        { "marker": "R6", "line": 25, "rule": "truncate", "severity": "destructive", "object": "public.plans" }
+      ],
+      "review": ["policy_matches_everything", "disables_rls", "removes_policy", "deletes_column", "deletes_table", "empties_table"],
+      "catalogChanges": [
+        { "kind": "column_removed", "object": "public.contacts.email" },
+        { "kind": "rls_disabled", "object": "public.expenses" },
+        { "kind": "relation_removed", "object": "public.activity_log" },
+        { "kind": "policy_added", "object": "public.clients: Signed-in users read all clients" },
+        { "kind": "policy_removed", "object": "public.quote_requests: Members read their quote requests" }
+      ]
+    },
+    {
+      "id": "good",
+      "migration": "demo/migrations/good/20261101090000_time_tracking.sql",
+      "exitCode": 0,
+      "verdict": "clean",
+      "applyOnSeededData": true,
+      "newLeaks": [],
+      "removedChecks": [],
+      "addedChecks": [
+        "table:public.time_entries:select:tenant_a",
+        "table:public.time_entries:insert:tenant_a",
+        "table:public.time_entries:update:tenant_a",
+        "table:public.time_entries:update_reassign:tenant_a",
+        "table:public.time_entries:delete:tenant_a",
+        "table:public.time_entries:select:anon",
+        "table:public.time_entries:insert:anon",
+        "table:public.time_entries:update:anon",
+        "table:public.time_entries:delete:anon"
+      ],
+      "statements": [],
+      "review": [],
+      "catalogChanges": [
+        { "kind": "column_added", "object": "public.projects.budget_minutes" },
+        { "kind": "relation_added", "object": "public.time_entries" },
+        { "kind": "policy_added", "object": "public.time_entries: Members correct their time entries" },
+        { "kind": "policy_added", "object": "public.time_entries: Members delete their time entries" },
+        { "kind": "policy_added", "object": "public.time_entries: Members log time in their organisation" },
+        { "kind": "policy_added", "object": "public.time_entries: Members read their time entries" }
+      ]
+    },
+    {
+      "id": "review",
+      "migration": "demo/migrations/review/20261101090000_project_codes.sql",
+      "exitCode": 4,
+      "verdict": "review_needed",
+      "applyOnSeededData": false,
+      "newLeaks": [],
+      "removedChecks": [],
+      "addedChecks": [],
+      "statements": [
+        { "marker": "V1", "line": 9, "rule": "drop_column", "severity": "destructive", "object": "public.contacts.email" }
+      ],
+      "review": ["deletes_column", "fails_on_existing_data"],
+      "catalogChanges": [
+        { "kind": "column_removed", "object": "public.contacts.email" },
+        { "kind": "column_added", "object": "public.projects.code" }
+      ]
+    }
+  ]
+}

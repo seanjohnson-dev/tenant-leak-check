@@ -107,4 +107,21 @@ describe("fix suggestions", () => {
     assert.match(findings[2]?.sql ?? "", /revoke insert, update, delete on "public"."plans"/);
     assert.match(findings[3]?.sql ?? "", /alter function "public"."get_all"\(p_org uuid\) security invoker;/);
   });
+
+  it("replaces only the leaking operation's policies and never drops a FOR ALL policy that guards the others", () => {
+    const withPolicies = agencyCatalog();
+    const clients = withPolicies.relations.find((r) => r.qualified === "public.clients");
+    assert.ok(clients);
+    clients.policies.push(
+      policy("public.clients", "Members manage their clients", "all", { using: "(org_id = x)", withCheck: "(org_id = x)" }),
+      policy("public.clients", "Anyone reads", "select", { using: "true" }),
+    );
+    const evidence = { actor: "tenant_a" as const, requests: [], summary: "x" };
+    const [finding] = findingsFor([leaked({ kind: "table", target: "public.clients", operation: "select", actor: "tenant_a" }, evidence)], withPolicies, buildTenancyModel(withPolicies, emptyConfig()));
+    const sql = finding?.sql ?? "";
+    assert.match(sql, /^drop policy "Anyone reads" on "public"."clients";$/m);
+    assert.doesNotMatch(sql, /^drop policy "Members manage their clients"/m);
+    assert.match(sql, /^-- Also check the policy "Members manage their clients" \(FOR ALL\)/m);
+    assert.match(sql, /create policy "Tenant members can select their own rows"/);
+  });
 });

@@ -54,10 +54,17 @@ const COMMAND_OF: Readonly<Record<string, "select" | "insert" | "update" | "dele
   delete: "delete",
 };
 
+/**
+ * Replaces the policies for one command. A FOR ALL policy also protects the other commands,
+ * so dropping it would open them; it is named in a comment for the reader to narrow instead.
+ */
 function dropPolicies(relation: Relation, command: string): string[] {
-  return relation.policies
-    .filter((p) => p.command === command || p.command === "all")
-    .map((p) => `drop policy ${ident(p.name)} on ${qualified(relation.qualified)};`);
+  const target = qualified(relation.qualified);
+  return relation.policies.flatMap((p) => {
+    if (p.command === command) return [`drop policy ${ident(p.name)} on ${target};`];
+    if (p.command === "all") return [`-- Also check the policy ${ident(p.name)} (FOR ALL): it applies to ${command} too, but dropping it would also remove its rules for the other operations.`];
+    return [];
+  });
 }
 
 /** A tenant-scoped policy for one command, for the authenticated role only. */
@@ -204,7 +211,11 @@ function storageFinding(check: CheckResult, catalog: Catalog, tenancy: TenancyMo
         : `  using (bucket_id = ${literal} and ${folderRule});`;
   const drops = catalog.storagePolicies
     .filter((p) => p.table === "objects" && (p.command === command || p.command === "all") && `${p.using ?? ""} ${p.withCheck ?? ""}`.includes(literal))
-    .map((p) => `drop policy ${ident(p.name)} on storage.objects;`);
+    .map((p) =>
+      p.command === "all"
+        ? `-- Also check the policy ${ident(p.name)} (FOR ALL): it applies to ${command} too, but dropping it would also remove its rules for the other operations.`
+        : `drop policy ${ident(p.name)} on storage.objects;`,
+    );
   return {
     checkId: check.id,
     title,

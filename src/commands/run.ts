@@ -1,28 +1,41 @@
 import { DISCLAIMER_SHORT } from "../core/disclaimer.ts";
-import { EXIT_MEANING } from "../core/exit-codes.ts";
 import { isFailureToTest } from "../core/results.ts";
-import type { RunResult } from "../engine.ts";
+import type { ReportPaths } from "../report/write.ts";
+import { type AnyResult, countsLine, exitLine, isDiff, plural, scopeLine, VERDICT_TEXT } from "../report/text.ts";
 
-const VERDICT_TEXT: Readonly<Record<RunResult["summary"]["verdict"], string>> = {
-  clean: "No leaks found. Every in-scope check was tested and blocked.",
-  leaks_found: "LEAKS FOUND: another tenant's data (or an anonymous visitor) got through.",
-  inconclusive: "No leaks found, but some checks could not be completed, so this is not a clean result.",
-};
-
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
+function migrationLines(result: AnyResult): string[] {
+  if (!isDiff(result)) return [];
+  const { migration } = result;
+  const lines = ["", `Migration: ${migration.files.join(", ")}`, migration.headline];
+  if (migration.results.newLeaks.length > 0) {
+    lines.push("", "New leaks introduced by the migration:");
+    for (const change of migration.results.newLeaks) lines.push(`  NEW LEAK  ${change.id}`);
+  }
+  if (migration.results.fixedLeaks.length > 0) {
+    lines.push("", "Leaks the migration fixes:");
+    for (const change of migration.results.fixedLeaks) lines.push(`  FIXED  ${change.id}`);
+  }
+  if (migration.review.length > 0) {
+    lines.push("", "Needs a human review:");
+    for (const item of migration.review) {
+      const where = item.file ? `${item.file} line ${item.line}: ` : "";
+      lines.push(`  REVIEW  ${where}${item.message}`);
+    }
+  }
+  return lines;
 }
 
 /** The short CLI summary of DESIGN.md section 11: counts, verdict, leaks, gaps, disclaimer and exit code. */
-export function formatRunSummary(result: RunResult): string {
+export function formatRunSummary(result: AnyResult, reports?: ReportPaths): string {
   const { summary } = result;
   const lines = [
-    `tenant-leak-check ${result.tool.version}: ${result.target.name}`,
+    `tenant-leak-check ${result.tool.version}: ${result.target.name}${isDiff(result) ? " (migration mode)" : ""}`,
     "",
     VERDICT_TEXT[summary.verdict],
+    ...migrationLines(result),
     "",
-    `Checks: ${summary.total} (${summary.counts.pass} pass, ${summary.counts.leak} leak, ${summary.counts.not_tested} not tested, ${summary.counts.inconclusive} inconclusive)`,
-    `Scope: ${plural(result.scope.tables.length, "table")}, ${plural(result.scope.views.length, "view")}, ${plural(result.scope.buckets.length, "storage bucket")}, ${plural(result.scope.functions.length, "client-callable function")}`,
+    `${isDiff(result) ? "After the migration: " : ""}${countsLine(result)}`,
+    `Scope: ${scopeLine(result)}`,
   ];
   const leaks = result.checks.filter((check) => check.status === "leak");
   if (leaks.length > 0) {
@@ -38,7 +51,8 @@ export function formatRunSummary(result: RunResult): string {
     lines.push("", "Problems with this run:");
     for (const problem of summary.runProblems) lines.push(`  - ${problem}`);
   }
-  if (result.warnings.length > 0) lines.push("", `Warnings from the schema review: ${result.warnings.length} (see the report).`);
-  lines.push("", DISCLAIMER_SHORT, `Exit code ${summary.exitCode}: ${EXIT_MEANING[summary.exitCode]}`);
+  if (result.warnings.length > 0) lines.push("", `Warnings from the schema review: ${plural(result.warnings.length, "warning")} (see the report).`);
+  if (reports) lines.push("", "Reports:", `  ${reports.html}`, `  ${reports.markdown}`, `  ${reports.json}`);
+  lines.push("", DISCLAIMER_SHORT, exitLine(result));
   return lines.join("\n");
 }

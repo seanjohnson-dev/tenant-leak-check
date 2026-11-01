@@ -157,51 +157,59 @@ async function setRoleTimeouts(db: Database): Promise<void> {
   await db.query("alter role authenticated set statement_timeout = '5s'");
 }
 
-function baseResult(options: RunOptions, sandbox: Sandbox, catalog: Catalog | undefined): Omit<RunResult, "tenancy" | "seeding" | "checks" | "findings" | "warnings" | "positiveControls" | "summary"> {
+function baseResult(toolVersion: string, sandbox: Sandbox, catalog: Catalog): Omit<RunResult, "tenancy" | "seeding" | "checks" | "findings" | "warnings" | "positiveControls" | "summary"> {
   const target: RunResult["target"] = {
     name: sandbox.projectDir.split("/").filter(Boolean).pop() ?? sandbox.slug,
     projectDir: sandbox.projectDir,
     migrations: sandbox.migrations,
     fingerprint: sandbox.fingerprint,
   };
-  if (catalog) target.postgresVersion = catalog.postgresVersion;
+  target.postgresVersion = catalog.postgresVersion;
   return {
-    tool: { name: "tenant-leak-check", version: options.toolVersion },
+    tool: { name: "tenant-leak-check", version: toolVersion },
     disclaimer: DISCLAIMER_FULL,
     generatedAt: new Date().toISOString(),
     target,
     scope: {
-      schemas: catalog?.schemas ?? [],
-      tables: catalog?.relations.filter(isBaseTable).map((r) => r.qualified) ?? [],
-      views: catalog?.relations.filter((r) => r.kind === "view" || r.kind === "materialized_view").map((r) => r.qualified) ?? [],
-      functions: catalog ? clientCallable(catalog.functions).map((fn) => fn.qualified) : [],
-      buckets: catalog?.buckets.map((b) => b.id) ?? [],
-      extensionObjects: catalog?.extensionObjects ?? [],
+      schemas: catalog.schemas,
+      tables: catalog.relations.filter(isBaseTable).map((r) => r.qualified),
+      views: catalog.relations.filter((r) => r.kind === "view" || r.kind === "materialized_view").map((r) => r.qualified),
+      functions: clientCallable(catalog.functions).map((fn) => fn.qualified),
+      buckets: catalog.buckets.map((b) => b.id),
+      extensionObjects: catalog.extensionObjects,
       notes: sandbox.settings.notes,
     },
   };
 }
 
-/** Runs one full check: sandbox, stack, discovery, seeding, probes, analysis (DESIGN.md section 4). */
-export async function runCheck(options: RunOptions): Promise<RunResult> {
-  const log = options.log ?? (() => {});
-  const config: ToolConfig = await loadConfig(options.projectDir, options.configPath);
-  const sandbox = await prepareSandbox({ projectDir: options.projectDir, workdir: options.workdir });
-  const stack = options.stack ?? new StackManager({ log });
-  log(`Building a local copy of ${sandbox.projectDir} from ${sandbox.migrations.length} migration file${sandbox.migrations.length === 1 ? "" : "s"}.`);
-  let credentials: StackCredentials | undefined;
-  let db: Database | undefined;
+/** One run's result plus the catalog it was based on (migration mode compares the catalogs). */
+export interface SandboxCheck {
+  result: RunResult;
+  catalog: Catalog;
+}
+
+export interface SandboxCheckOptions {
+  config: ToolConfig;
+  toolVersion: string;
+  log: (line: string) => void;
+}
+
+/**
+ * Checks a sandbox whose stack was just made fresh (StackManager.ensureFresh): discovery,
+ * seeding, probes and analysis. Leaves the stack running with the seeded data in place.
+ */
+export async function checkSandbox(sandbox: Sandbox, credentials: StackCredentials, options: SandboxCheckOptions): Promise<SandboxCheck> {
+  const { config, log } = options;
+  const api = new ApiClient(credentials);
+  await waitForServices(api);
+  const db = await Database.connect(credentials.dbUrl);
   try {
-    credentials = await stack.ensureFresh(sandbox);
-    const api = new ApiClient(credentials);
-    await waitForServices(api);
-    db = await Database.connect(credentials.dbUrl);
     await setRoleTimeouts(db);
     log("Reading the database catalog.");
     const catalog = await discoverCatalog(db, sandbox.settings.schemas);
     const tenancy = buildTenancyModel(catalog, config);
     const warnings = staticWarnings(catalog, tenancy, config);
-    const base = baseResult(options, sandbox, catalog);
+    const base = baseResult(options.toolVersion, sandbox, catalog);
     log("Creating two synthetic tenants with test users, rows and files.");
     let users;
     try {
@@ -209,7 +217,7 @@ export async function runCheck(options: RunOptions): Promise<RunResult> {
     } catch (error) {
       if (!(error instanceof SetupProblem)) throw error;
       const problem = `${error.message}${error.hint ? ` ${error.hint}` : ""}`;
-      return {
+      const result: RunResult = {
         ...base,
         tenancy: tenancyView(tenancy),
         seeding: seedingView(undefined, []),
@@ -219,6 +227,7 @@ export async function runCheck(options: RunOptions): Promise<RunResult> {
         positiveControls: [],
         summary: summarize([], [problem]),
       };
+      return { result, catalog };
     }
     const seed = await seedRows(db, catalog, tenancy, config, users);
     const files = await seedFiles(api, catalog.buckets, seed.tenants, tenancy.tenantRoot !== undefined || [...tenancy.tables.values()].some((t) => t.ownership.kind === "tenant"), config);
@@ -230,7 +239,7 @@ export async function runCheck(options: RunOptions): Promise<RunResult> {
     const ctx: ProbeContext = { db, api, catalog, tenancy, config, seed, world, userA: users.A };
     const { checks, controls } = await probeEverything(ctx, files, log);
     const problems = [...runLevelProblems(tenancy, controls)];
-    return {
+    const result: RunResult = {
       ...base,
       tenancy: tenancyView(tenancy),
       seeding: seedingView(seed, files),
@@ -240,11 +249,30 @@ export async function runCheck(options: RunOptions): Promise<RunResult> {
       positiveControls: controls,
       summary: summarize(checks, problems),
     };
+    return { result, catalog };
   } finally {
-    await db?.close().catch(() => {});
-    if (!options.keepRunning && credentials) {
-      log("Stopping the local stack.");
-      await stack.stop(sandbox).catch((error: unknown) => log(`Could not stop the local stack: ${(error as Error).message}`));
-    }
+    await db.close().catch(() => {});
+  }
+}
+
+/** Stops the sandbox stack unless the user asked to keep it, and never lets a failed stop hide the real result. */
+export async function stopUnlessKept(stack: StackManager, sandbox: Sandbox, keepRunning: boolean, log: (line: string) => void): Promise<void> {
+  if (keepRunning) return;
+  log("Stopping the local stack.");
+  await stack.stop(sandbox).catch((error: unknown) => log(`Could not stop the local stack: ${(error as Error).message}`));
+}
+
+/** Runs one full check: sandbox, stack, discovery, seeding, probes, analysis (DESIGN.md section 4). */
+export async function runCheck(options: RunOptions): Promise<RunResult> {
+  const log = options.log ?? (() => {});
+  const config: ToolConfig = await loadConfig(options.projectDir, options.configPath);
+  const sandbox = await prepareSandbox({ projectDir: options.projectDir, workdir: options.workdir });
+  const stack = options.stack ?? new StackManager({ log });
+  log(`Building a local copy of ${sandbox.projectDir} from ${sandbox.migrations.length} migration file${sandbox.migrations.length === 1 ? "" : "s"}.`);
+  const credentials = await stack.ensureFresh(sandbox);
+  try {
+    return (await checkSandbox(sandbox, credentials, { config, toolVersion: options.toolVersion, log })).result;
+  } finally {
+    await stopUnlessKept(stack, sandbox, options.keepRunning, log);
   }
 }

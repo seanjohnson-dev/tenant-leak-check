@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { toolVersion } from "../../src/cli.ts";
@@ -10,6 +11,8 @@ import { isFailureToTest } from "../../src/core/results.ts";
 import { runCheck, type RunResult } from "../../src/engine.ts";
 import { PROJECT_ID_PREFIX, sandboxSlug } from "../../src/stack/sandbox.ts";
 import { StackManager } from "../../src/stack/supabase.ts";
+import { esc } from "../../src/report/html.ts";
+import { validate } from "../unit/schema-validator.ts";
 
 /*
  * Needs Docker and the Supabase CLI (run with: npm run test:integration).
@@ -38,8 +41,11 @@ function run(projectDir: string): Promise<RunResult> {
   return runCheck({ projectDir, workdir, keepRunning: true, toolVersion: toolVersion() });
 }
 
-function runCli(projectDir: string, keepRunning: boolean): Promise<{ code: number; stdout: string }> {
-  const args = [cli, "run", "--project", projectDir, "--workdir", workdir, ...(keepRunning ? ["--keep-running"] : [])];
+const reportsDir = `${workdir}/it-demo-reports`;
+const schema = JSON.parse(readFileSync(`${repo}docs/report.schema.json`, "utf8")) as Record<string, unknown>;
+
+function runCli(projectDir: string, keepRunning: boolean, out: string): Promise<{ code: number; stdout: string }> {
+  const args = [cli, "run", "--project", projectDir, "--workdir", workdir, "--out", out, ...(keepRunning ? ["--keep-running"] : [])];
   return new Promise((resolve) => {
     execFile(process.execPath, args, { maxBuffer: 16 * 1024 * 1024, timeout: 20 * 60_000 }, (error, stdout) => {
       const code = error === null ? 0 : typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : -1;
@@ -132,12 +138,30 @@ describe("demo/broken: every planted leak is caught", { timeout: TIMEOUT }, () =
 
 describe("demo/broken through the CLI", { timeout: TIMEOUT }, () => {
   it("exits with code 1 and lists every planted leak", async () => {
-    const { code, stdout } = await runCli(brokenDir, true);
+    const { code, stdout } = await runCli(brokenDir, true, `${reportsDir}/broken`);
     assert.equal(code, EXIT.leaks, stdout);
     for (const id of expectedLeaks) assert.ok(stdout.includes(`LEAK  ${id}`), `${id} missing from the CLI output`);
     assert.ok(stdout.includes(DISCLAIMER_SHORT));
     assert.match(stdout, /Exit code 1: /);
     assertNoSecrets(stdout);
+  });
+
+  it("writes JSON, Markdown and HTML reports with every planted leak, its evidence and fix", async () => {
+    const json = JSON.parse(await readFile(`${reportsDir}/broken/report.json`, "utf8")) as { mode: string; summary: { exitCode: number }; findings: { checkId: string }[] };
+    assert.deepEqual(validate(schema, json), []);
+    assert.equal(json.mode, "run");
+    assert.equal(json.summary.exitCode, EXIT.leaks);
+    assert.deepEqual(json.findings.map((f) => f.checkId).sort(), [...expectedLeaks].sort());
+    const markdown = await readFile(`${reportsDir}/broken/report.md`, "utf8");
+    const html = await readFile(`${reportsDir}/broken/report.html`, "utf8");
+    assert.ok(markdown.includes(DISCLAIMER_FULL));
+    assert.ok(html.includes(esc(DISCLAIMER_FULL)));
+    for (const text of [markdown, html]) {
+      assert.ok(text.includes(`Leaks found (${expectedLeaks.length})`));
+      for (const id of expectedLeaks) assert.ok(text.includes(id), `${id} missing from a report`);
+      assertNoSecrets(text);
+    }
+    assert.doesNotMatch(html, /<script/i);
   });
 });
 
@@ -178,9 +202,13 @@ describe("demo/fixed: clean, with every check actually run", { timeout: TIMEOUT 
 });
 
 describe("demo/fixed through the CLI", { timeout: TIMEOUT }, () => {
-  it("exits with code 0", async () => {
-    const { code, stdout } = await runCli(fixedDir, false);
+  it("exits with code 0 and writes a clean, valid report", async () => {
+    const { code, stdout } = await runCli(fixedDir, false, `${reportsDir}/fixed`);
     assert.equal(code, EXIT.clean, stdout);
+    const json = JSON.parse(await readFile(`${reportsDir}/fixed/report.json`, "utf8")) as { summary: { verdict: string } };
+    assert.deepEqual(validate(schema, json), []);
+    assert.equal(json.summary.verdict, "clean");
+    assert.match(await readFile(`${reportsDir}/fixed/report.html`, "utf8"), /No leaks found/);
     assert.match(stdout, /No leaks found\. Every in-scope check was tested and blocked\./);
     assert.ok(stdout.includes(DISCLAIMER_SHORT));
     assertNoSecrets(stdout);
@@ -188,6 +216,7 @@ describe("demo/fixed through the CLI", { timeout: TIMEOUT }, () => {
 });
 
 after(async () => {
+  await rm(reportsDir, { recursive: true, force: true });
   const stack = new StackManager();
   const ours = new Set([brokenDir, fixedDir].map((dir) => `${PROJECT_ID_PREFIX}${sandboxSlug(dir)}`));
   for (const id of await stack.runningOwnStacks()) if (ours.has(id)) await stack.stopProject(id);

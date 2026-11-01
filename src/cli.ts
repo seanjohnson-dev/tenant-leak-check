@@ -8,6 +8,8 @@ import { runCheck, type RunOptions } from "./engine.ts";
 import { DISCLAIMER_SHORT } from "./core/disclaimer.ts";
 import { ToolError } from "./core/errors.ts";
 import { EXIT, EXIT_MEANING, type ExitCode } from "./core/exit-codes.ts";
+import { type DiffOptions, runDiff } from "./migrate/diff.ts";
+import { DEFAULT_OUT_DIR, writeReports } from "./report/write.ts";
 
 export const DEFAULT_WORKDIR = ".tlc-work";
 
@@ -34,11 +36,19 @@ export function helpText(): string {
     "in a LOCAL Supabase project built from its migrations. It never connects to hosted projects.",
     "",
     "Usage:",
+    "  tenant-leak-check run --project <folder>",
+    "      Build a local copy of the project from its migrations and test tenant isolation.",
+    "  tenant-leak-check diff --project <folder> --migration <file.sql> [--migration <file.sql> ...]",
+    "      Migration mode: test the project before and after the new migration(s) and report what changed.",
+    "",
+    "Options for run and diff:",
+    `  --out <folder>        Where report.html, report.md and report.json go (default: ./${DEFAULT_OUT_DIR})`,
+    "  --config <file>       Tenancy overrides (default: <project folder>/tenant-leak-check.json)",
+    `  --workdir <folder>    Where the sandbox is kept (default: ./${DEFAULT_WORKDIR})`,
+    "  --keep-running        Leave the local stack running afterwards",
+    "",
+    "Other commands:",
     "  tenant-leak-check doctor [--workdir <folder>]   Check that Docker, the Supabase CLI and memory are ready",
-    "  tenant-leak-check run --project <folder>         Build a local copy of the project and test tenant isolation",
-    "        [--config <file>]                          Tenancy overrides (default: <folder>/tenant-leak-check.json)",
-    "        [--workdir <folder>]                       Where the sandbox is kept (default: ./.tlc-work)",
-    "        [--keep-running]                           Leave the local stack running afterwards",
     "  tenant-leak-check --help                         Show this help",
     "  tenant-leak-check --version                      Show the version",
     "",
@@ -49,23 +59,25 @@ export function helpText(): string {
   ].join("\n");
 }
 
-async function runCommand(args: string[], io: Output): Promise<ExitCode> {
-  const { values } = parseArgs({
-    args,
-    options: {
-      project: { type: "string" },
-      config: { type: "string" },
-      workdir: { type: "string", default: DEFAULT_WORKDIR },
-      "keep-running": { type: "boolean", default: false },
-    },
-    strict: true,
-    allowPositionals: false,
-  });
-  if (!values.project) {
-    throw new ToolError("Missing --project.", "Give the folder that contains supabase/migrations, for example: tenant-leak-check run --project ../my-app");
+const SHARED_OPTIONS = {
+  project: { type: "string" },
+  config: { type: "string" },
+  out: { type: "string", default: DEFAULT_OUT_DIR },
+  workdir: { type: "string", default: DEFAULT_WORKDIR },
+  "keep-running": { type: "boolean", default: false },
+} as const;
+
+function requireProject(project: string | undefined, command: string): string {
+  if (!project) {
+    throw new ToolError("Missing --project.", `Give the folder that contains supabase/migrations, for example: tenant-leak-check ${command} --project ../my-app`);
   }
+  return resolve(project);
+}
+
+async function runCommand(args: string[], io: Output): Promise<ExitCode> {
+  const { values } = parseArgs({ args, options: SHARED_OPTIONS, strict: true, allowPositionals: false });
   const options: RunOptions = {
-    projectDir: resolve(values.project),
+    projectDir: requireProject(values.project, "run"),
     workdir: resolve(values.workdir),
     keepRunning: values["keep-running"],
     toolVersion: toolVersion(),
@@ -73,7 +85,30 @@ async function runCommand(args: string[], io: Output): Promise<ExitCode> {
   };
   if (values.config) options.configPath = resolve(values.config);
   const result = await runCheck(options);
-  io.out(formatRunSummary(result));
+  const reports = await writeReports(result, values.out);
+  io.out(formatRunSummary(result, reports));
+  return result.summary.exitCode;
+}
+
+async function diffCommand(args: string[], io: Output): Promise<ExitCode> {
+  const { values } = parseArgs({
+    args,
+    options: { ...SHARED_OPTIONS, migration: { type: "string", multiple: true, default: [] } },
+    strict: true,
+    allowPositionals: false,
+  });
+  const options: DiffOptions = {
+    projectDir: requireProject(values.project, "diff"),
+    migrations: values.migration.map((path) => resolve(path)),
+    workdir: resolve(values.workdir),
+    keepRunning: values["keep-running"],
+    toolVersion: toolVersion(),
+    log: (line) => io.err(line),
+  };
+  if (values.config) options.configPath = resolve(values.config);
+  const result = await runDiff(options);
+  const reports = await writeReports(result, values.out);
+  io.out(formatRunSummary(result, reports));
   return result.summary.exitCode;
 }
 
@@ -108,6 +143,8 @@ export async function main(argv: readonly string[], io: Output = consoleOutput):
         return await doctorCommand(rest, io);
       case "run":
         return await runCommand(rest, io);
+      case "diff":
+        return await diffCommand(rest, io);
       default:
         throw new ToolError(`Unknown command "${command}".`, "Run tenant-leak-check --help to see the available commands.");
     }

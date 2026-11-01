@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp as makeTemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
-import { ToolError } from "../../src/core/errors.ts";
+import { MigrationsFailed, ToolError } from "../../src/core/errors.ts";
 import {
   EXCLUDED_SERVICES,
   generateConfigToml,
@@ -14,9 +14,20 @@ import {
   sandboxSlug,
   selectMigrationFiles,
 } from "../../src/stack/sandbox.ts";
-import { type CliResult, parseOwnStackIds, parseStatus, StackManager, summarizeCliFailure } from "../../src/stack/supabase.ts";
+import { type CliResult, migrationErrorText, parseOwnStackIds, parseStatus, StackManager, summarizeCliFailure } from "../../src/stack/supabase.ts";
 
 const scratch = fileURLToPath(new URL("../../.tlc-work/", import.meta.url));
+
+/** Every temporary folder these tests create, removed again when the file's tests finish. */
+const created: string[] = [];
+async function mkdtemp(prefix: string): Promise<string> {
+  const dir = await makeTemp(prefix);
+  created.push(dir);
+  return dir;
+}
+after(async () => {
+  for (const dir of created) await rm(dir, { recursive: true, force: true });
+});
 
 const ok = (stdout = ""): CliResult => ({ ok: true, missing: false, timedOut: false, stdout, stderr: "" });
 const failed = (stderr: string): CliResult => ({ ok: false, missing: false, timedOut: false, stdout: "", stderr });
@@ -191,6 +202,40 @@ describe("supabase CLI wrapper", () => {
     const { manager, calls } = fakes([], { start: failed('ERROR: relation "missing" does not exist (SQLSTATE 42P01)') });
     await assert.rejects(manager.ensureFresh(sandbox), (error: unknown) => error instanceof ToolError && /migrations could not be applied/.test(error.message));
     assert.ok(calls.some((call) => call.startsWith(`stop --project-id ${sandbox.projectId}`)));
+  });
+
+  it("applies new migrations with migration up --local and returns a readable failure", async () => {
+    const workdir = await mkdtemp(join(scratch, "unit-stack-"));
+    const project = await makeProject({ "supabase/migrations/20240101000000_init.sql": "select 1;" });
+    const sandbox = await prepareSandbox({ projectDir: project, workdir });
+    const { manager, calls } = fakes([], {});
+    assert.deepEqual(await manager.migrationUp(sandbox), { ok: true });
+    assert.equal(calls[0], `migration up --local --workdir ${sandbox.dir}`);
+    const cliError = JSON.stringify({ _tag: "Error", error: { message: 'ERROR: column "code" contains null values (SQLSTATE 23502)\nAt statement: 1\nalter table t add column code text not null' } });
+    const failing = fakes([], { "migration up": failed(`Applying migration 20240101000000_init.sql...\n${cliError}`) });
+    assert.deepEqual(await failing.manager.migrationUp(sandbox), {
+      ok: false,
+      detail: 'ERROR: column "code" contains null values (SQLSTATE 23502). Failing statement: alter table t add column code text not null',
+    });
+  });
+
+  it("throws MigrationsFailed when the migrations themselves fail on a fresh database", async () => {
+    const workdir = await mkdtemp(join(scratch, "unit-stack-"));
+    const project = await makeProject({ "supabase/migrations/20240101000000_init.sql": "select 1;" });
+    const sandbox = await prepareSandbox({ projectDir: project, workdir });
+    const { manager } = fakes([], { start: failed('Applying migration 20240101000000_init.sql...\nERROR: relation "missing" does not exist (SQLSTATE 42P01)\nAt statement 0: select * from missing') });
+    await assert.rejects(manager.ensureFresh(sandbox), (error: unknown) => {
+      assert.ok(error instanceof MigrationsFailed);
+      assert.equal(error.detail, 'ERROR: relation "missing" does not exist (SQLSTATE 42P01). Failing statement: select * from missing');
+      return true;
+    });
+    const timedOut = fakes([], { start: { ...failed("migration step"), timedOut: true } });
+    await assert.rejects(timedOut.manager.ensureFresh(sandbox), (error: unknown) => error instanceof ToolError && !(error instanceof MigrationsFailed));
+  });
+
+  it("keeps the migration error readable whatever form the CLI prints it in", () => {
+    assert.equal(migrationErrorText('ERROR: syntax error at or near "tabel" (SQLSTATE 42601)'), 'ERROR: syntax error at or near "tabel" (SQLSTATE 42601)');
+    assert.equal(migrationErrorText("something odd\nhappened"), "something odd / happened");
   });
 
   it("says so when the CLI is missing", async () => {

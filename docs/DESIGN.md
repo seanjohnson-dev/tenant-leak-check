@@ -67,11 +67,11 @@ Planned source layout (built across sessions 1 to 3):
 | `src/seed/` | Synthetic users, tenants, rows and files; value generation; snapshot and restore |
 | `src/probe/` | HTTP client and the probe matrix for tables and views, storage and RPCs |
 | `src/analyze/` | Static rules (catalog-based warnings) and plain-English fix text with SQL snippets |
-| `src/migrate/` | Migration SQL scanner, catalog diff, result diff |
+| `src/migrate/` | Migration SQL scanner, catalog diff, result diff, `runDiff` |
 | `src/report/` | JSON (with schema), Markdown and HTML renderers |
 | `demo/` | Deliberately broken app, fixed app, leak manifest, demo migrations |
 | `test/unit/`, `test/integration/` | Unit tests (no Docker) and integration tests (real local stack) |
-| `.claude/` | Claude Code command and skill ("run the leak check") |
+| `.claude/`, `integrations/claude-code/` | Claude Code command and skill ("run the leak check") |
 
 ### 4.1 Commands
 
@@ -262,6 +262,17 @@ SQL snippets are labelled "starting point: review before applying".
 6. **Result diff** by check id: new leaks (pass to leak), fixed leaks (leak to pass), checks that stopped being testable, and checks for objects that appeared or disappeared.
 7. **Report**: summary first ("this migration introduces 2 new leaks and drops 1 column"), then new leaks with evidence and fixes, then security-relevant catalog changes, destructive statements with line numbers, and finally the full before and after matrices.
 
+### 9.1 How it was built (session 3)
+
+- Code: `src/migrate/scan.ts` (scanner), `catalog-diff.ts`, `result-diff.ts` and `diff.ts` (`runDiff`, review items, headline, exit code). `runDiff` reuses `checkSandbox` from `src/engine.ts` for both runs, so "before" and "after" are tested exactly like `run`.
+- New migrations must sort after every existing migration (the CLI applies files in name order); otherwise the tool stops with exit 3 and asks for a later timestamp.
+- **Severities.** Each scanner finding and catalog change is `destructive` (data or objects lost), `security` (an access rule weakened), `attention` (worth a look, common in healthy migrations) or `info`. Only `destructive` and `security` become review items (exit 4 when there is no leak). `attention` covers `SECURITY DEFINER` functions (the probes test them anyway), grants to `authenticated`, `GRANT USAGE ON SCHEMA`, `DO` blocks (their contents cannot be scanned), new policies being changed, and a view, function, policy or trigger that is dropped and created again later in the same migrations (a replacement). A dropped and re-created **table** stays destructive: its rows do not come back.
+- The scanner blanks comments, string literals and dollar-quoted bodies (so statements inside function bodies are not flagged), keeps the case of quoted identifiers, and qualifies unqualified names with `public`.
+- **Review items are de-duplicated**: a fact found both by the scanner and by the catalog diff (for example `DROP TABLE` and "table removed") is listed once, from the scanner, because it has a file and line.
+- Catalog-only review items: a new table with RLS off that clients can use, a view that loses `security_invoker`, a bucket made public or removed. Policies of removed tables are not listed separately.
+- **Apply outcomes.** If `migration up` fails on the seeded data, the "after" run still happens on a fresh database, and the failure is a review item ("fails on a database that already holds data"). If the migration cannot be applied even to a fresh database, there is no "after" run: no checks, a run problem, review item `fails_to_apply`, exit 4. The Postgres error is reduced to one line: the error plus the failing statement.
+- **Exit code** = `combineExitCodes([after run's code, 4 if any review item])`. Verdict `review_needed` exists only in migration mode.
+
 ## 10. Config file (optional)
 
 `tenant-leak-check.json` in the target folder, or given with `--config`. JSON keeps the tool dependency-free. Unknown keys are an error (exit 3) with the path of the offending key, so typos are not silently ignored.
@@ -298,18 +309,22 @@ All three formats come from one in-memory result object.
 - **CLI output**: a short summary with counts, the verdict, where the reports are, the disclaimer, and the exit code meaning.
 - Reports never contain keys, JWTs, passwords, or real data. Only schema names and synthetic values appear.
 
+As built (session 3): renderers live in `src/report/` (`text.ts` shared wording, grids and labels; `json.ts`, `markdown.ts`, `html.ts`; `write.ts`). `writeReports` redacts every string of the result before rendering and every rendered file again after it, because escaping (JSON `\"`, HTML `&quot;`) can hide a secret from a single text pass. The summary verdict also has `review_needed` (migration mode), and the JSON adds `mode`, `summary.exitMeaning` and `migration.before`. The HTML carries a Content-Security-Policy meta tag that allows inline styles only. Markdown escapes database-provided text so it cannot add links, HTML or table columns. In the fix SQL, a `FOR ALL` policy is never dropped (that would remove its rules for the other operations); it is named in a comment instead. Writing to `--out` happens only after a successful run; on exit code 3 no report is written.
+
 ## 12. Demo apps and proof
 
 - `demo/broken/`: a small multi-tenant "agency" app (organisations, members, projects, tasks, invoices, payments, notes, files) with **planted leaks** covering every category the tool claims to detect: RLS disabled; policies written but RLS never enabled; `USING (true)`; a policy that ignores the tenant (any member of any organisation); insert with another tenant's id (missing `WITH CHECK`); update across tenants; re-assigning a row to another tenant; delete across tenants; anon read; anon write; a public bucket; a storage read policy that ignores the folder; a storage write policy that ignores the folder; a `SECURITY DEFINER` RPC that reads another tenant's data; a `SECURITY DEFINER` RPC that deletes another tenant's data; a view that bypasses RLS; a materialized view exposed to clients; a child table owned only through its parent; and a shared table that clients can write.
 - `demo/fixed/`: the same schema with every leak fixed the recommended way.
 - `demo/leaks.json`: a machine-readable manifest. Each planted leak has an id (`L01` to `L19`), a category, a description, the check ids that must report `leak` (48 in all) and the schema warnings it must raise (22 in all). `demo/LEAKS.md` is the human-readable version. The integration tests compare both lists exactly, in both directions: nothing missed on the broken app, nothing extra reported, and on the fixed app every one of the 48 checks ran and passed.
-- `demo/migrations/bad/` and `demo/migrations/good/`: migrations on top of the fixed app. The bad one introduces a leak, disables RLS, drops a policy, drops a column and drops a table. The good one adds a new tenant table with correct RLS and policies.
-- **Integration tests** (`npm run test:integration`, needs Docker): broken app gives exit 1 and every manifest leak is reported; fixed app gives exit 0 with zero leaks and zero failure-type `not_tested` or `inconclusive`; the bad migration gives exit 1 and flags each planted regression; the good migration gives exit 0.
+- `demo/migrations/bad/`, `good/` and `review/`: migrations on top of the fixed app, with `demo/migrations/expected.json` listing exactly what must be reported. The bad one adds a `USING (true)` policy (new leak), disables RLS (nine new leaks), drops a policy, drops a column, drops a table and truncates a table: exit 1. The good one adds a new tenant table with correct RLS and policies plus a column with a default: exit 0. The review one drops a column and adds a required column without a default (fails on seeded data only): exit 4.
+- **Integration tests** (`npm run test:integration`, needs Docker): broken app gives exit 1 and every manifest leak is reported; fixed app gives exit 0 with zero leaks and zero failure-type `not_tested` or `inconclusive`; each demo migration gives its expected exit code, new leaks, statements (with lines), review items, catalog changes and added/removed checks, compared exactly; a migration that cannot be applied at all gives exit 4; the CLI writes reports that validate against `docs/report.schema.json`.
 - **Unit tests** (`npm test`, no Docker): URL guard, exit-code precedence, config validation, tenancy inference on fixture catalogs, value generation for check constraints, the migration SQL scanner, catalog and result diffs, and report rendering (including that the disclaimer is present and secrets are redacted).
 
 ## 13. Claude Code integration
 
 The repo includes `.claude/commands/leak-check.md` and `.claude/skills/tenant-leak-check/SKILL.md`, so that saying "run the leak check on <project>" in Claude Code runs `doctor`, then `run` (or `diff` for a migration), then summarises the report in plain English with the disclaimer. Nothing is installed into `~/.claude`.
+
+As built (session 3): the source of both files is `integrations/claude-code/`. The build harness treats writes to `.claude/` as sensitive and could not get approval in a non-interactive session, so the copy into `.claude/` is a one-line step for a person (`integrations/claude-code/README.md`). The unit tests check that both files only name real CLI commands and options, explain every exit code, keep the safety rules and the disclaimer, and that any `.claude/` copy is identical to the source.
 
 ## 14. Build plan
 

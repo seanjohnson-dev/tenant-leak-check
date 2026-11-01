@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CONFIG_FILE_NAME, emptyConfig, loadConfig, qualifiedName, validateConfig } from "../../src/config/config.ts";
 import { ToolError } from "../../src/core/errors.ts";
 
 const scratch = fileURLToPath(new URL("../../.tlc-work/", import.meta.url));
+const created: string[] = [];
+after(async () => {
+  for (const dir of created) await rm(dir, { recursive: true, force: true });
+});
 
 function problem(raw: unknown, pattern: RegExp): void {
   assert.throws(
@@ -68,6 +72,7 @@ describe("config validation", () => {
   it("loads the project's config file, an explicit file, or nothing", async () => {
     await mkdir(scratch, { recursive: true });
     const dir = await mkdtemp(join(scratch, "unit-config-"));
+    created.push(dir);
     assert.deepEqual(await loadConfig(dir), emptyConfig());
     await writeFile(join(dir, CONFIG_FILE_NAME), JSON.stringify({ tables: { "public.x": { shared: true } } }));
     const loaded = await loadConfig(dir);

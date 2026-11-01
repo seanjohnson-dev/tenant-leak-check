@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ToolError } from "../core/errors.ts";
+import { MigrationsFailed, ToolError } from "../core/errors.ts";
 import { assertLocalUrl } from "../safety/local-only.ts";
 import { EXCLUDED_SERVICES, PROJECT_ID_PREFIX, type Sandbox } from "./sandbox.ts";
 
@@ -47,7 +47,7 @@ export const runSupabaseCli: CliRunner = (args, timeoutMs) =>
     );
   });
 
-const ALLOWED_SUBCOMMANDS = new Set(["start", "status", "db reset"]);
+const ALLOWED_SUBCOMMANDS = new Set(["start", "status", "db reset", "migration up"]);
 
 /** Keeps the last lines of CLI output that explain a failure, with anything that looks like a key removed. */
 export function summarizeCliFailure(result: CliResult): string {
@@ -60,6 +60,36 @@ export function summarizeCliFailure(result: CliResult): string {
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !/^(Try rerunning|Run supabase|https:\/\/github\.com\/supabase)/.test(line));
   return lines.slice(-6).join("\n");
+}
+
+function tidyPostgresError(message: string): string {
+  const lines = message.split("\n").map((line) => line.trim()).filter(Boolean);
+  const error = lines[0] ?? message.trim();
+  const at = lines.findIndex((line) => /^At statement\b/i.test(line));
+  // "At statement: 1" is followed by the statement on the next lines; "At statement 0: <sql>" carries it inline.
+  const inline = at >= 0 ? (/^At statement:?\s*\d*\s*:?\s*(.*)$/i.exec(lines[at] as string)?.[1] ?? "") : "";
+  const statement = at >= 0 ? [inline, ...lines.slice(at + 1)].filter((line) => line && !line.startsWith("--")).join(" ").replace(/\s+/g, " ") : "";
+  if (!statement) return error;
+  return `${error}. Failing statement: ${statement.length > 200 ? `${statement.slice(0, 199)}…` : statement}`;
+}
+
+/**
+ * Turns the CLI's report of a failed migration into one readable line: the Postgres error and
+ * the statement that caused it. The CLI prints it either as plain text or as a JSON error line.
+ */
+export function migrationErrorText(detail: string): string {
+  for (const line of detail.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const message = (JSON.parse(trimmed) as { error?: { message?: unknown } }).error?.message;
+      if (typeof message === "string") return tidyPostgresError(message);
+    } catch {
+      // Not JSON after all; fall through to the plain-text form.
+    }
+  }
+  const start = detail.search(/ERROR:/);
+  return start >= 0 ? tidyPostgresError(detail.slice(start)) : detail.replace(/\s*\n\s*/g, " / ");
 }
 
 /** Reads the fields the tool needs from `supabase status -o json` and checks that every URL is local. */
@@ -208,12 +238,12 @@ export class StackManager {
     const start = await this.#run(sandbox, "start", ["-x", EXCLUDED_SERVICES.join(",")], START_TIMEOUT_MS);
     if (!start.ok) {
       const detail = summarizeCliFailure(start);
-      const migrationFailed = /migration|ERROR:|SQLSTATE/i.test(detail);
       await this.stopProject(sandbox.projectId).catch(() => {});
+      if (!start.timedOut && /migration|ERROR:|SQLSTATE/i.test(detail)) {
+        throw new MigrationsFailed(migrationErrorText(detail), "Fix the failing statement (the Supabase CLI would fail the same way), then run the check again.");
+      }
       throw new ToolError(
-        migrationFailed
-          ? `The project's migrations could not be applied to a fresh local database:\n${detail}`
-          : `The local Supabase stack did not start:\n${detail}`,
+        `The local Supabase stack did not start:\n${detail}`,
         start.timedOut
           ? `The start did not finish within ${START_TIMEOUT_MS / 60_000} minutes. Check Docker (docker ps) and try again.`
           : "Run tenant-leak-check doctor to check Docker, memory and networking.",
@@ -221,6 +251,23 @@ export class StackManager {
     }
     await writeFile(join(sandbox.dir, FINGERPRINT_FILE), sandbox.fingerprint);
     return this.credentials(sandbox);
+  }
+
+  /**
+   * Applies the sandbox's pending migrations to the running stack, on top of the data it
+   * holds (migration mode, DESIGN.md section 9 step 3). A failure is returned, not thrown:
+   * a migration that fails here is a finding about the migration, not a tool error.
+   */
+  async migrationUp(sandbox: Sandbox): Promise<{ ok: true } | { ok: false; detail: string }> {
+    const result = await this.#run(sandbox, "migration up", ["--local"], RESET_TIMEOUT_MS);
+    if (result.ok) return { ok: true };
+    if (result.timedOut) {
+      throw new ToolError(
+        `Applying the new migration did not finish within ${RESET_TIMEOUT_MS / 60_000} minutes.`,
+        "Check Docker (docker ps) and try again.",
+      );
+    }
+    return { ok: false, detail: migrationErrorText(summarizeCliFailure(result)) };
   }
 
   async stop(sandbox: Sandbox): Promise<void> {

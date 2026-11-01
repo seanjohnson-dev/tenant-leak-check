@@ -6,6 +6,8 @@ It builds a throwaway copy of the app's database **on your own computer**, from 
 
 > **This is an automated tenant-isolation test, not a security certification, audit or penetration test.** It proves what it tested, and the report lists exactly what that was. It says nothing about anything it did not test.
 
+It is free and open source under the [MIT licence](LICENSE). Version 0.1.0: young software, so read its reports with care, and see [the limits](#8-questions-and-limits).
+
 ---
 
 ## Contents
@@ -19,6 +21,7 @@ It builds a throwaway copy of the app's database **on your own computer**, from 
 7. [Use it from Claude Code](#7-use-it-from-claude-code)
 8. [Questions and limits](#8-questions-and-limits)
 9. [What is in this folder](#9-what-is-in-this-folder)
+10. [Licence and reporting problems](#10-licence-and-reporting-problems)
 
 ---
 
@@ -36,17 +39,24 @@ It builds a throwaway copy of the app's database **on your own computer**, from 
 
 ## 2. What you need (one-time setup)
 
-- **Node.js 24 or newer.**
-- **Docker**, running. Supabase's local stack runs inside it.
-- **The Supabase CLI** (version 2.x).
+- **Node.js 24 or newer** ([nodejs.org](https://nodejs.org/)).
+- **Docker**, running ([Docker Engine](https://docs.docker.com/engine/install/) or Docker Desktop). Supabase's local stack runs inside it.
+- **The Supabase CLI**, version 2.x ([install guide](https://supabase.com/docs/guides/local-development/cli/getting-started)). Built and tested with 2.122.
 - About **1.5 GB of free memory** while a check runs (the local stack itself uses about 400 MB; the tool switches off the Supabase parts it does not need).
+- **git**, to download the tool.
 
-Then, in this folder:
+It was built and tested on Linux. It should work wherever Docker and the Supabase CLI run, but other systems have not been tested yet.
+
+Download the tool and install its two small dependencies:
 
 ```sh
+git clone https://github.com/seanjohnson-dev/tenant-leak-check.git
+cd tenant-leak-check
 npm install
 node src/cli.ts doctor
 ```
+
+All the commands below are run from this `tenant-leak-check` folder.
 
 `doctor` checks all of the above and explains, in plain words, how to fix anything that is missing. If it says Docker refuses permission and your user was just added to the `docker` group, put `sg docker -c "..."` around each command (or log out and in again).
 
@@ -209,3 +219,9 @@ npm run test:integration   # demo apps and demo migrations against a real local 
 ```
 
 Runtime dependencies: `pg` and `smol-toml`. Everything else is built into Node.
+
+## 10. Licence and reporting problems
+
+[MIT licence](LICENSE): free to use, change and share, including for paid work, with no warranty.
+
+Found a bug, a false result or a leak the tool missed? Please open a GitHub issue with the steps to reproduce it, ideally a small set of migration files. Never include real customer data, keys or `.env` contents: the tool does not need them, and neither does the issue.

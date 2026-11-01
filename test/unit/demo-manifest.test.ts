@@ -18,7 +18,7 @@ interface Leak {
 const manifest = JSON.parse(readFileSync(`${demo}leaks.json`, "utf8")) as { leaks: Leak[] };
 const leaksMd = readFileSync(`${demo}LEAKS.md`, "utf8");
 
-/** Every leak category the tool claims to detect (brief, PROOF (b); DESIGN.md section 12). */
+/** Every leak category the tool claims to detect (DESIGN.md section 12). */
 const CATEGORIES = [
   /row level security disabled/i,
   /row level security not enabled|missing protection/i,

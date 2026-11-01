@@ -1,6 +1,6 @@
 # tenant-leak-check: design
 
-Status: agreed design for v1 (31 Oct 2026). This document is the reference for every later build session. If the code and this document disagree, fix one of them in the same commit.
+Status: design for v1, updated as built (November 2026). This document is the reference for the code. If the code and this document disagree, fix one of them in the same commit.
 
 ## 1. Purpose and promise
 
@@ -38,7 +38,7 @@ Explicitly out of scope for v1 (stated in every report's "Not covered" section):
 - **TypeScript on Node 24**, run directly with Node's built-in type stripping (`node src/cli.ts`). There is no build step. The code therefore uses erasable syntax only (no `enum`, no `namespace`, no parameter properties) and imports with explicit `.ts` extensions. `tsc --noEmit` type-checks the code.
 - **Runtime dependencies (2):** `pg` (direct Postgres access to the local database for discovery, seeding and verification) and `smol-toml` (reading the target's `config.toml`). HTTP uses Node's built-in `fetch`. CLI parsing uses `node:util` `parseArgs`. Tests use `node:test`.
 - **Dev dependencies:** `typescript`, `@types/node`, `@types/pg`.
-- **Supabase CLI 2.122+ and Docker Engine.** The stack runs with only the services the tool needs: Postgres, GoTrue (auth), PostgREST, Storage API and Kong. Studio, imgproxy, edge-runtime, logflare, vector, realtime, supavisor, mailpit and postgres-meta are switched off in the generated config and also excluded with `-x`. Measured on the build box: the reduced stack uses about 390 MB of RAM.
+- **Supabase CLI 2.122+ and Docker Engine.** The stack runs with only the services the tool needs: Postgres, GoTrue (auth), PostgREST, Storage API and Kong. Studio, imgproxy, edge-runtime, logflare, vector, realtime, supavisor, mailpit and postgres-meta are switched off in the generated config and also excluded with `-x`. Measured on the build machine: the reduced stack uses about 390 MB of RAM.
 
 ## 4. Architecture
 
@@ -93,12 +93,12 @@ tenant-leak-check --help | --version
 - Sandbox folder: `<workdir>/<slug>/` where `workdir` defaults to `./.tlc-work` (git-ignored) and `slug` comes from the target folder name plus a short hash of its absolute path.
 - The generated `config.toml` sets `project_id = "tlc-<slug>"`, disables unneeded services, turns off `db.seed` (the target's seed file is never run), keeps email sign-up on with confirmations off, and uses a dedicated port block (API 55421, DB 55422, shadow 55420, other unused ports in 554xx) so it never collides with a developer's own stack on 543xx.
 - Values copied from the target's `config.toml` when present: `api.schemas`, `api.extra_search_path`, `api.max_rows`, `db.major_version`, and `[storage.buckets.*]` (`public`, `file_size_limit`, `allowed_mime_types`; never `objects_path`). Any value written as `env(...)` is ignored and noted, because it refers to a secret.
-- Only one stack runs at a time (the box has about 2 to 4 GB of free RAM). Before starting, the tool stops any other `tlc-*` stack it owns.
+- Only one stack runs at a time, to keep memory use low on small machines. Before starting, the tool stops any other `tlc-*` stack it owns.
 - Running a second target or the "after" half of migration mode reuses the running stack with `supabase db reset --local` when the generated config is identical, and restarts it when it differs.
 
-### 4.3 Box-specific note: Docker networking
+### 4.3 Host note: Docker networking
 
-On the build box (a pod with no systemd and pre-existing legacy iptables rules), containers on the same Docker bridge could not reach each other until bridged traffic was taken out of iptables (`sysctl net.bridge.bridge-nf-call-iptables=0`, same for ip6tables). Symptom: `supabase start` fails at "Initialising schema" with a realtime `DBConnection.ConnectionError`. `doctor` reports this symptom and its fix in plain English. The setting does not survive a reboot, and `dockerd` has to be started by hand on this box (`sudo dockerd`).
+On some Linux hosts (seen on a container host with no systemd and pre-existing legacy iptables rules), containers on the same Docker bridge cannot reach each other until bridged traffic is taken out of iptables (`sysctl net.bridge.bridge-nf-call-iptables=0`, same for ip6tables). Symptom: `supabase start` fails at "Initialising schema" with a realtime `DBConnection.ConnectionError`. `doctor` reports this symptom and its fix in plain English. The setting does not survive a reboot. On hosts without systemd, `dockerd` may also need to be started by hand (`sudo dockerd`).
 
 ## 5. Discovery
 
@@ -265,7 +265,7 @@ SQL snippets are labelled "starting point: review before applying".
 6. **Result diff** by check id: new leaks (pass to leak), fixed leaks (leak to pass), checks that stopped being testable, and checks for objects that appeared or disappeared.
 7. **Report**: summary first ("this migration introduces 2 new leaks and drops 1 column"), then new leaks with evidence and fixes, then security-relevant catalog changes, destructive statements with line numbers, and finally the full before and after matrices.
 
-### 9.1 How it was built (session 3)
+### 9.1 As built
 
 - Code: `src/migrate/scan.ts` (scanner), `catalog-diff.ts`, `result-diff.ts` and `diff.ts` (`runDiff`, review items, headline, exit code). `runDiff` reuses `checkSandbox` from `src/engine.ts` for both runs, so "before" and "after" are tested exactly like `run`.
 - New migrations must sort after every existing migration (the CLI applies files in name order); otherwise the tool stops with exit 3 and asks for a later timestamp.
@@ -330,7 +330,7 @@ All three formats come from one in-memory result object.
 - **CLI output**: a short summary with counts, the verdict, where the reports are, the disclaimer, and the exit code meaning.
 - Reports never contain keys, JWTs, passwords, or real data. Only schema names and synthetic values appear.
 
-As built (session 3): renderers live in `src/report/` (`text.ts` shared wording, grids and labels; `json.ts`, `markdown.ts`, `html.ts`; `write.ts`). `writeReports` redacts every string of the result before rendering and every rendered file again after it, because escaping (JSON `\"`, HTML `&quot;`) can hide a secret from a single text pass. The summary verdict also has `review_needed` (migration mode), and the JSON adds `mode`, `summary.exitMeaning` and `migration.before`. The HTML carries a Content-Security-Policy meta tag that allows inline styles only. Markdown escapes database-provided text so it cannot add links, HTML or table columns. In the fix SQL, a `FOR ALL` policy is never dropped (that would remove its rules for the other operations); it is named in a comment instead. Writing to `--out` happens only after a successful run; on exit code 3 no report is written.
+As built: renderers live in `src/report/` (`text.ts` shared wording, grids and labels; `json.ts`, `markdown.ts`, `html.ts`; `write.ts`). `writeReports` redacts every string of the result before rendering and every rendered file again after it, because escaping (JSON `\"`, HTML `&quot;`) can hide a secret from a single text pass. The summary verdict also has `review_needed` (migration mode), and the JSON adds `mode`, `summary.exitMeaning` and `migration.before`. The HTML carries a Content-Security-Policy meta tag that allows inline styles only. Markdown escapes database-provided text so it cannot add links, HTML or table columns. In the fix SQL, a `FOR ALL` policy is never dropped (that would remove its rules for the other operations); it is named in a comment instead. Writing to `--out` happens only after a successful run; on exit code 3 no report is written.
 
 ## 12. Demo apps and proof
 
@@ -345,13 +345,13 @@ As built (session 3): renderers live in `src/report/` (`text.ts` shared wording,
 
 The repo includes `.claude/commands/leak-check.md` and `.claude/skills/tenant-leak-check/SKILL.md`, so that saying "run the leak check on <project>" in Claude Code runs `doctor`, then `run` (or `diff` for a migration), then summarises the report in plain English with the disclaimer. Nothing is installed into `~/.claude`.
 
-As built (session 3): the source of both files is `integrations/claude-code/`. The build harness treats writes to `.claude/` as sensitive and could not get approval in a non-interactive session, so the copy into `.claude/` is a one-line step for a person (`integrations/claude-code/README.md`). The unit tests check that both files only name real CLI commands and options, explain every exit code, keep the safety rules and the disclaimer, and that any `.claude/` copy is identical to the source. Session 4 hit the same approval wall, so the copy is still the person's one-line step.
+As built: the source of both files is `integrations/claude-code/`. Copying them into `.claude/` is a one-line step for the user (`integrations/claude-code/README.md`). The unit tests check that both files only name real CLI commands and options, explain every exit code, keep the safety rules and the disclaimer, and that any `.claude/` copy is identical to the source.
 
 ## 14. Build plan
 
-| Session | Work |
+| Stage | Work |
 | --- | --- |
-| 1 | Install Docker and the Supabase CLI, verify the reduced stack, write this design, scaffold (CLI, `doctor`, URL guard, exit codes, disclaimer, unit tests), create the private repo, first push. |
+| 1 | Install Docker and the Supabase CLI, verify the reduced stack, write this design, scaffold (CLI, `doctor`, URL guard, exit codes, disclaimer, unit tests). |
 | 2 | Sandbox and stack manager, discovery, tenancy model, seeding, the probe matrix (tables, views, storage, RPCs) for tenant A and anon, the broken and fixed demos with the leak manifest, unit and integration tests. |
 | 3 | Migration mode, JSON, Markdown and HTML reports with the schema doc, exit codes wired end to end, the Claude Code command and skill. |
 | 4 | A run against a real-world SaaS project (synthetic data only), README for non-coders, final tests. |

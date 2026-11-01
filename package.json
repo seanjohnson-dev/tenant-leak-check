@@ -4,7 +4,7 @@
   "description": "Tests whether one tenant can read or change another tenant's data in a local Supabase project. An isolation test, not a security certification.",
   "private": true,
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=24"
   },

@@ -4,7 +4,7 @@ import { primaryKey, TENANT_COLUMN_NAMES, USER_COLUMN_NAMES } from "../discover/
 import { ownerOf, resolvePlaceholder, rowsOf } from "../seed/rows.ts";
 import { randomTag } from "../seed/values.ts";
 import { ACTORS, actorName, callerFor, findMarkers, foreignMarkers, type ProbeContext } from "./common.ts";
-import { evidenceOf, excerpt, type HttpResponse } from "./http.ts";
+import { type Caller, evidenceOf, excerpt, type HttpResponse, type RequestOptions } from "./http.ts";
 
 /** Types PostgREST accepts as a single unnamed argument (the raw request body). */
 const RAW_BODY_TYPES = new Set(["json", "jsonb", "text", "bytea", "xml"]);
@@ -75,7 +75,10 @@ export function clientCallable(functions: readonly FunctionInfo[]): FunctionInfo
   return functions.filter((fn) => fn.executable.anon || fn.executable.authenticated);
 }
 
-/** Calls one function as tenant A and as an anonymous visitor and looks for read and write leaks. */
+/**
+ * Calls one function as tenant B (the control), then, only if that worked, as tenant A and as
+ * an anonymous visitor with the same request, and looks for read and write leaks.
+ */
 export async function probeFunction(ctx: ProbeContext, fn: FunctionInfo): Promise<CheckResult[]> {
   const skip = ctx.config.rpc.skip[fn.qualified];
   if (skip) return ACTORS.map((actor) => notTested(specOf(fn, actor), "excluded", `Excluded in the config: ${skip}`));
@@ -107,16 +110,35 @@ export async function probeFunction(ctx: ProbeContext, fn: FunctionInfo): Promis
   }
   const sent = new Set<string>();
   for (const value of Object.values(body ?? {})) if (typeof value === "string") sent.add(value);
+  const requestFor = (caller: Caller): RequestOptions => ({
+    method: "POST",
+    path: `/rest/v1/rpc/${encodeURIComponent(fn.name)}`,
+    headers: { "Content-Profile": fn.schema },
+    caller,
+    ...(raw ? { raw } : { json: body ?? {} }),
+  });
+  const identifiers = excerpt(JSON.stringify(body ?? raw?.body ?? {}), 200);
+  // The control (DESIGN.md section 7.4): tenant B, who owns the data the request points at,
+  // sends the identical request first. A refusal only means something if the request works.
+  const controlOptions = requestFor({ kind: "user", accessToken: ctx.seed.tenants.B.user.accessToken });
+  const controlResponse = await ctx.api.send(controlOptions);
+  const controlRequest = evidenceOf(controlOptions, controlResponse);
+  await ctx.world.restore();
+  const control = controlOutcome(controlResponse);
+  if (!control.ok) {
+    return ACTORS.map((actor) =>
+      inconclusive(specOf(fn, actor), control.reason, {
+        actor,
+        requests: [controlRequest],
+        before: `Control call: tenant B, who owns the data, sent this request with its own login first: ${identifiers}.`,
+        summary: `The control call to ${fn.qualified} failed, so ${actorName(actor).toLowerCase()} was not tried.`,
+      }),
+    );
+  }
   const checks: CheckResult[] = [];
   for (const actor of ACTORS) {
     const spec = specOf(fn, actor);
-    const options = {
-      method: "POST" as const,
-      path: `/rest/v1/rpc/${encodeURIComponent(fn.name)}`,
-      headers: { "Content-Profile": fn.schema },
-      caller: callerFor(ctx, actor),
-      ...(raw ? { raw } : { json: body ?? {} }),
-    };
+    const options = requestFor(callerFor(ctx, actor));
     const response = await ctx.api.send(options);
     const request = evidenceOf(options, response);
     const after = await ctx.world.read();
@@ -141,8 +163,8 @@ export async function probeFunction(ctx: ProbeContext, fn: FunctionInfo): Promis
     const found = findMarkers(response.text, markers);
     const evidence: Evidence = {
       actor,
-      requests: [request],
-      before: `The call passed tenant B's identifiers: ${excerpt(JSON.stringify(body ?? raw?.body ?? {}), 200)}.`,
+      requests: [controlRequest, request],
+      before: `Control call: tenant B, who owns the data, sent the same request with its own login first and it worked (HTTP ${controlResponse.status}, the first request listed). The call passed tenant B's identifiers: ${identifiers}.`,
       summary: "",
     };
     if (touched.length > 0 || found.length > 0) {
@@ -165,10 +187,55 @@ export async function probeFunction(ctx: ProbeContext, fn: FunctionInfo): Promis
   return checks;
 }
 
+type Answer = Pick<HttpResponse, "status" | "networkError" | "errorCode" | "errorMessage">;
+
+const RPC_ADVICE = "Give this function realistic arguments in the config (rpc.args), or check it by hand.";
+
+/** "HTTP 400 (P0001: unknown action)": an answer in one short phrase, for reasons. */
+function answerText(response: Answer): string {
+  if (response.networkError) return `no answer (${response.networkError})`;
+  const message = response.errorMessage?.replace(/[.!?]+$/, "");
+  const detail = [response.errorCode, message].filter(Boolean).join(": ");
+  return `HTTP ${response.status}${detail ? ` (${detail})` : ""}`;
+}
+
+export type ControlOutcome = { ok: true } | { ok: false; reason: string };
+
+/** Whether the owner's own call worked. Only a successful answer proves the request itself is valid. */
+export function controlOutcome(response: Answer): ControlOutcome {
+  if (!response.networkError && response.status >= 200 && response.status < 300) return { ok: true };
+  return {
+    ok: false,
+    reason: `Control call failed: tenant B, who owns the data, sent the same request with its own login and got ${answerText(
+      response,
+    )}. The request itself does not work, so a refusal for anyone else would prove nothing, and tenant A and the anonymous visitor were not tried. ${RPC_ADVICE}`,
+  };
+}
+
+/** Words that describe a request's shape or values rather than who is asking. */
+const INPUT_WORDS =
+  /\b(unknown|unsupported|unrecogni[sz]ed|invalid|malformed|missing|required|validation|expected|must (?:be|have|not)|wrong (?:shape|type|format)|bad (?:argument|input|request|value|parameter)|not supported|cannot be (?:null|empty)|out of range|too (?:long|short|large|small|many|few))\b/i;
+
+/**
+ * The reason, if an error answer refused the request's input rather than the caller: SQLSTATE
+ * class 22 (data exception), 23 (constraint violation) or 42 except 42501 (for example an
+ * undefined function), or a message about the input ("unknown action", "invalid status").
+ * When a message mixes input and denial words, input wins: a false "unclear" costs a look,
+ * a false "pass" hides a leak.
+ */
+export function inputRefusal(response: Answer): string | undefined {
+  const code = response.errorCode ?? "";
+  const byCode = /^(22|23|42)/.test(code) && code !== "42501";
+  if (!byCode && !INPUT_WORDS.test(response.errorMessage ?? "")) return undefined;
+  return `Refused the input, not the tenant: the function answered ${answerText(
+    response,
+  )}. That is about the request's shape or values, not about who is asking, so it does not show that another tenant's data is protected. ${RPC_ADVICE}`;
+}
+
 export type QuietCallOutcome = { pass: true; notes: string[] } | { pass: false; reason: string };
 
 /** The verdict for a call that returned no other tenant's data and changed none of it. */
-export function quietCallOutcome(response: Pick<HttpResponse, "status" | "networkError" | "errorCode" | "errorMessage">): QuietCallOutcome {
+export function quietCallOutcome(response: Answer): QuietCallOutcome {
   if (response.networkError) return { pass: false, reason: `The API gave no answer (${response.networkError}).` };
   if (response.status >= 200 && response.status < 300) return { pass: true, notes: [] };
   // A RAISE inside the function (P0001 raise_exception, P0002 no_data_found) is the function
@@ -180,6 +247,10 @@ export function quietCallOutcome(response: Pick<HttpResponse, "status" | "networ
     return { pass: false, reason: `The API could not run the function (${response.errorCode}${response.errorMessage ? `: ${response.errorMessage}` : ""}).` };
   }
   const denied = response.errorCode === "42501" || response.status === 401 || response.status === 403;
+  if (denied) return { pass: true, notes: ["Blocked by permissions."] };
+  // A refusal of the request's input is never a pass: it says nothing about tenant B's data.
+  const refusedInput = inputRefusal(response);
+  if (refusedInput) return { pass: false, reason: refusedInput };
   const message = (response.errorMessage ?? `HTTP ${response.status}`).replace(/[.!?]+$/, "");
-  return { pass: true, notes: [denied ? "Blocked by permissions." : `The function refused the call: ${message}.`] };
+  return { pass: true, notes: [`The function refused the call: ${message}.`] };
 }

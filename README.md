@@ -171,6 +171,12 @@ Two settings help with apps whose words or history are unusual:
   { "build": { "files": [ { "path": "../my-app/supabase/schema.sql", "version": "20240101000000" } ] } }
   ```
 
+A database function reported as **Unclear** usually needs a realistic request (section 8 explains why). Give its arguments with `rpc.args`; placeholders such as `{tenantB.row:public.invoices}` (tenant B's row id) or `{tenantB.tenant}` point the request at tenant B's data:
+
+```json
+{ "rpc": { "args": { "public.archive_invoice": { "p_invoice_id": "{tenantB.row:public.invoices}", "p_reason": "duplicate" } } } }
+```
+
 Every setting is described in [docs/DESIGN.md, section 10](docs/DESIGN.md#10-config-file-optional). A typo in the file is reported with the exact setting at fault rather than being ignored.
 
 ## 7. Use it from Claude Code
@@ -193,11 +199,18 @@ mkdir -p .claude && cp -R integrations/claude-code/commands integrations/claude-
 
 **A table I expected to be tested shows "n/a".** The tool decided every customer shares that table. Check "How we decided who owns each table" in the report; if it is wrong, add the table to the config with its owner column.
 
-**Why are some things "Not tested" or "Unclear"?** Usually because the tool could not create believable test data for a table (a database rule refused it), or because a database function failed for a reason that had nothing to do with access. The reason is always shown. A config entry (section 6) often fixes it.
+**Why are some things "Not tested" or "Unclear"?** Usually because the tool could not create believable test data for a table (a database rule refused it), or because a database function failed or refused the request for a reason that had nothing to do with access (see "How database functions are checked" below). The reason is always shown. A config entry (section 6) often fixes it.
 
 **Can I run it in CI on every pull request?** Yes: use the exit codes above. Migration mode (`diff`) is designed for "check this one new migration".
 
-**Limits worth knowing.** Two test customers, each with one test user and a couple of rows per table. Ownership comes from columns and links: data protected in other ways (for example by values inside the user's login token) may need a config entry. Views are tested for reading, and for writing when the view accepts writes; functions are called once, with tenant B's identifiers and simple placeholder values filled in automatically. A function that needs very specific input (for example a detailed JSON payload) may refuse that call for reasons that have nothing to do with access: it counts as passed because nothing of tenant B's came back or changed, and the report shows the function's own answer next to it so you can tell an access refusal ("not found on this account") from an input refusal ("unknown action"). Supply realistic arguments in the config (`rpc.args`) to test such a function more deeply. Only the database, login, API and storage parts of Supabase run; Edge Functions, Realtime and webhooks are not tested.
+**How database functions are checked, and why some say "Unclear".** A refusal only proves something if the request itself was valid. So each function is first called by tenant B, the owner of the data, with the exact request the test will use (tenant B's identifiers and simple placeholder values filled in automatically). This is the **control call**. Only if it works do tenant A and the anonymous visitor send the same request.
+- If the control call fails, the request itself does not work (for example the function needs a detailed JSON payload). The check is **Unclear** with the reason "Control call failed: ...", and tenant A and the visitor are not tried at all.
+- If the control call works but tenant A or the visitor get an **input refusal** (for example "unknown action", "invalid value", "missing field", a wrong type or shape), the function refused the request, not the person. The check is **Unclear** with the reason "Refused the input, not the tenant: ...".
+- Neither is ever counted as a Pass. A Pass means a real refusal of the other person (for example "permission denied", "not found on this account", or nothing of tenant B's came back and nothing changed). If tenant B's data comes back or changes, it is a LEAK.
+- Unclear works like every other unclear result: if there are no leaks, the run ends with exit code 2 ("not a clean result"), never 0.
+- **What to do about Unclear:** give that function realistic arguments in the config (`rpc.args`, section 6), using the `{tenantB...}` placeholders so the request points at tenant B's data, and run again. If the function is never meant to be called by customers, take away its execute permission from `anon` and `authenticated`, or exclude it in the config (`rpc.skip`) with a note saying why. Until then, check that function by hand.
+
+**Limits worth knowing.** Two test customers, each with one test user and a couple of rows per table. Ownership comes from columns and links: data protected in other ways (for example by values inside the user's login token) may need a config entry. Views are tested for reading, and for writing when the view accepts writes; functions are tested with one request each, as described above. Only the database, login, API and storage parts of Supabase run; Edge Functions, Realtime and webhooks are not tested.
 
 ## 9. What is in this folder
 

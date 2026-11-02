@@ -36,7 +36,7 @@ When several apply, the highest-priority code wins: 3, then 1, then 4, then 2, t
    - **Pass**: we tried it and it was blocked; tenant B's data was there and untouched.
    - **LEAK**: we tried it and it worked.
    - **Not tested**: we could not run it (the reason is listed); this stops the result from being clean.
-   - **Unclear**: we ran it but the answer was unclear (for example a server error); also stops a clean result.
+   - **Unclear**: we ran it but the answer was unclear (for example a server error); also stops a clean result. For database functions this includes a failed control call (reason "Control call failed: ...") and an input refusal (reason "Refused the input, not the tenant: ..."); neither is ever a Pass.
    - **n/a / Skipped**: nothing to test by nature, or switched off in the config.
 6. **Leaks found**: one card per leak with what we sent, what the database held before, what came back or changed, the problem in plain English, the fix, and an SQL starting point (always labelled "review before applying").
 7. **Warnings from the schema review**: rules that look risky when reading the structure. They are not proven leaks.
@@ -97,7 +97,7 @@ Each check is one actor attempting one operation on one object.
 | `reason` | Why a check is `not_tested` or `inconclusive`. |
 | `notTestedKind` | `not_applicable` (nothing to test by nature), `excluded` (switched off in the config) or `could_not_test` (the tool tried and failed; blocks a clean result). |
 | `notes` | Extra remarks, for example "blocked by permissions". |
-| `evidence` | `actor`, `requests[]` (`method`, `path`, optional synthetic `body`, `status`, a redacted `response` excerpt), `before` (what the database held right before), `after` (what came back or changed), `summary` (one sentence). Present on every leak and on most passes. |
+| `evidence` | `actor`, `requests[]` (`method`, `path`, optional synthetic `body`, `status`, a redacted `response` excerpt), `before` (what the database held right before), `after` (what came back or changed), `summary` (one sentence). Present on every leak and on most passes. For `rpc` checks, `requests[0]` is the control call made by tenant B (the owner of the data) and `requests[1]`, if present, is the attempt; a failed control has only the control call. |
 
 ### Tenancy entries
 

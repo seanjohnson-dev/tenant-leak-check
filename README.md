@@ -238,3 +238,9 @@ Runtime dependencies: `pg` and `smol-toml`. Everything else is built into Node.
 [MIT licence](LICENSE): free to use, change and share, including for paid work, with no warranty.
 
 Found a bug, a false result or a leak the tool missed? Please open a GitHub issue with the steps to reproduce it, ideally a small set of migration files. Never include real customer data, keys or `.env` contents: the tool does not need them, and neither does the issue.
+
+## No warranty
+
+tenant-leak-check is a testing aid, not a guarantee that an app is secure or that customer data cannot leak. A clean result covers only what it tested, and it can miss things. It is free under the [MIT licence](LICENSE), provided as is, with no warranty. You use it at your own risk.
+
+
